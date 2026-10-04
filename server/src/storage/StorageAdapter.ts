@@ -17,6 +17,23 @@ import type {
   TimeFilter,
 } from "../types.js";
 
+export interface StoredUserAccount {
+  id: string;
+  email: string;
+  passwordHash: string;
+  ownerName: string;
+  shopId: string;
+  createdAt: string;
+}
+
+export interface StoredAuthSession {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  createdAt: string;
+  expiresAt: Date;
+}
+
 export interface StorageAdapter {
   // Catalog
   listProducts(shopId: string): Promise<Product[]>;
@@ -43,6 +60,15 @@ export interface StorageAdapter {
   queryLosses(shopId: string, filter?: TimeFilter): Promise<Loss[]>;
   getSettings(shopId: string): Promise<Settings>;
   updateSettings(shopId: string, changes: SettingsUpdate): Promise<Settings>;
+
+  // Authentication accounts and revocable, server-side sessions
+  createUser(user: StoredUserAccount): Promise<void>;
+  findUserByEmail(email: string): Promise<StoredUserAccount | null>;
+  findUserById(userId: string): Promise<StoredUserAccount | null>;
+  deleteUserById(userId: string): Promise<void>;
+  createAuthSession(session: StoredAuthSession): Promise<void>;
+  findAuthSessionByTokenHash(tokenHash: string): Promise<StoredAuthSession | null>;
+  deleteAuthSessionByTokenHash(tokenHash: string): Promise<void>;
 
   // Lifecycle and repeatable demo seed
   connect(): Promise<void>;

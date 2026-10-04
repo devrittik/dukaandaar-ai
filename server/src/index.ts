@@ -1,9 +1,10 @@
 import "dotenv/config";
 import cors from "cors";
-import express, { type ErrorRequestHandler } from "express";
+import express, { type ErrorRequestHandler, type Request, type RequestHandler, type Response } from "express";
 import { z, ZodError } from "zod";
 import { createStorage } from "./storage/index.js";
 import { BusinessLogic } from "./services/businessLogic.js";
+import { AuthError, AuthService, toPublicAuthUser, type AuthPrincipal } from "./services/authService.js";
 import { ConversationMemory } from "./services/conversationMemory.js";
 import type { ConversationTurn } from "./services/llmProvider.js";
 import { getDashboard } from "./services/analyticsService.js";
@@ -12,12 +13,40 @@ import { getSpeechStatus, SpeechServiceError, speechUploadLimitBytes, synthesize
 import { log, logError, logWarn } from "./utils/logger.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
-const SHOP_ID = process.env.SHOP_ID ?? "shop_001";
 const storage = createStorage();
-const business = new BusinessLogic(storage);
+const auth = new AuthService(storage);
+const businessByShop = new Map<string, { instance: BusinessLogic; lastUsedAt: number }>();
 const conversationMemory = new ConversationMemory();
 const app = express();
 
+function businessForShop(shopId: string): BusinessLogic {
+  const now = Date.now();
+  for (const [key, value] of businessByShop) {
+    if (now - value.lastUsedAt >= 30 * 60_000) businessByShop.delete(key);
+  }
+  const cached = businessByShop.get(shopId);
+  const entry = cached ?? { instance: new BusinessLogic(storage, shopId), lastUsedAt: now };
+  entry.lastUsedAt = now;
+  businessByShop.delete(shopId);
+  businessByShop.set(shopId, entry);
+  while (businessByShop.size > 512) {
+    const oldest = businessByShop.keys().next().value as string | undefined;
+    if (!oldest) break;
+    businessByShop.delete(oldest);
+  }
+  return entry.instance;
+}
+
+const SignUpSchema = z.object({
+  ownerName: z.string().trim().min(1).max(100),
+  shopName: z.string().trim().min(1).max(100),
+  email: z.string().trim().email().max(254),
+  password: z.string().min(8).max(128),
+}).strict();
+const LoginSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(1).max(128),
+}).strict();
 const SettingsUpdateSchema = z.object({
   shopName: z.string().trim().min(1).max(100),
   ownerName: z.string().trim().min(1).max(100),
@@ -56,17 +85,115 @@ function conversationSessionId(value: unknown): string | null {
   return /^[a-zA-Z0-9_-]{8,128}$/.test(candidate) ? candidate : null;
 }
 
+const SESSION_COOKIE_NAME = "dukaandaar_session";
+function readSessionToken(request: Request): string | null {
+  const cookieHeader = request.headers.cookie;
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== SESSION_COOKIE_NAME) continue;
+    const value = part.slice(separator + 1).trim();
+    return value || null;
+  }
+  return null;
+}
+
+function setSessionCookie(response: Response, token: string, expiresAt: Date): void {
+  const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
+  const cookie = [`${SESSION_COOKIE_NAME}=${token}`, "Path=/api", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
+  if (process.env.NODE_ENV === "production") cookie.push("Secure");
+  response.setHeader("Set-Cookie", cookie.join("; "));
+}
+
+function clearSessionCookie(response: Response): void {
+  const cookie = [`${SESSION_COOKIE_NAME}=`, "Path=/api", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"];
+  if (process.env.NODE_ENV === "production") cookie.push("Secure");
+  response.setHeader("Set-Cookie", cookie.join("; "));
+}
+
+function authenticatedPrincipal(response: Response): AuthPrincipal {
+  return response.locals.authenticatedPrincipal as AuthPrincipal;
+}
+
+const requireAuthentication: RequestHandler = (request, response, next) => {
+  void auth.authenticate(readSessionToken(request)).then((principal) => {
+    if (!principal) {
+      clearSessionCookie(response);
+      response.status(401).json({ error: "Please sign in to continue." });
+      return;
+    }
+    response.locals.authenticatedPrincipal = principal;
+    next();
+  }).catch(next);
+};
+
 app.disable("x-powered-by");
-app.use(cors({ origin: process.env.CLIENT_ORIGIN ? process.env.CLIENT_ORIGIN.split(",").map((value) => value.trim()) : true }));
+const configuredOrigins = process.env.CLIENT_ORIGIN?.split(",").map((value) => value.trim()).filter(Boolean);
+const corsOrigins = configuredOrigins?.length ? configuredOrigins : process.env.NODE_ENV === "production" ? false : true;
+app.use(cors({ origin: corsOrigins, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use((request, _response, next) => {
   log("http", `${request.method} ${request.path}`);
   next();
 });
 
+const requireBrowserRequestHeader: RequestHandler = (request, response, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) { next(); return; }
+  if (request.get("X-Requested-With") !== "Dukaandaar") {
+    response.status(403).json({ error: "The request could not be verified. Refresh the page and try again." });
+    return;
+  }
+  next();
+};
+app.use("/api", requireBrowserRequestHeader);
+
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, service: "dukaandaar-api", storage: process.env.STORAGE_DRIVER ?? "mongo", shopId: SHOP_ID });
+  response.json({ ok: true, service: "dukaandaar-api", storage: process.env.STORAGE_DRIVER ?? "mongo" });
 });
+
+app.post("/api/auth/signup", async (request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  try {
+    const input = SignUpSchema.parse(request.body);
+    const grant = await auth.register(input);
+    setSessionCookie(response, grant.token, grant.expiresAt);
+    response.status(201).json({ user: toPublicAuthUser(grant.user) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/auth/login", async (request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  try {
+    const input = LoginSchema.parse(request.body);
+    const grant = await auth.login(input.email, input.password);
+    setSessionCookie(response, grant.token, grant.expiresAt);
+    response.json({ user: toPublicAuthUser(grant.user) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/auth/me", async (request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  try {
+    const principal = await auth.authenticate(readSessionToken(request));
+    if (!principal) {
+      clearSessionCookie(response);
+      response.status(401).json({ error: "Not signed in." });
+      return;
+    }
+    response.json({ user: toPublicAuthUser(principal) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/auth/logout", async (request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  try {
+    await auth.logout(readSessionToken(request));
+    clearSessionCookie(response);
+    response.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+app.use("/api", requireAuthentication);
 
 app.get("/api/speech/status", async (_request, response, next) => {
   try { response.json(await getSpeechStatus()); }
@@ -97,14 +224,14 @@ app.post("/api/speech/synthesize", async (request, response, next) => {
 
 app.get("/api/dashboard", async (_request, response, next) => {
   try {
-    const dashboard = await getDashboard(storage, SHOP_ID);
+    const dashboard = await getDashboard(storage, authenticatedPrincipal(response).shopId);
     response.json(dashboard);
   } catch (error) { next(error); }
 });
 
 app.get("/api/products", async (_request, response, next) => {
   try {
-    const dashboard = await getDashboard(storage, SHOP_ID);
+    const dashboard = await getDashboard(storage, authenticatedPrincipal(response).shopId);
     response.json(dashboard.products);
   } catch (error) { next(error); }
 });
@@ -112,21 +239,21 @@ app.get("/api/products", async (_request, response, next) => {
 app.put("/api/products/:id", async (request, response, next) => {
   try {
     const changes = ProductUpdateSchema.parse(request.body);
-    const product = await storage.updateProduct(SHOP_ID, request.params.id, changes);
+    const product = await storage.updateProduct(authenticatedPrincipal(response).shopId, request.params.id, changes);
     response.json(product);
   } catch (error) { next(error); }
 });
 
 app.get("/api/settings", async (_request, response, next) => {
   try {
-    response.json(await storage.getSettings(SHOP_ID));
+    response.json(await storage.getSettings(authenticatedPrincipal(response).shopId));
   } catch (error) { next(error); }
 });
 
 app.put("/api/settings", async (request, response, next) => {
   try {
     const changes = SettingsUpdateSchema.parse(request.body);
-    response.json(await storage.updateSettings(SHOP_ID, changes));
+    response.json(await storage.updateSettings(authenticatedPrincipal(response).shopId, changes));
   } catch (error) { next(error); }
 });
 
@@ -135,10 +262,10 @@ app.get("/api/transactions", async (_request, response, next) => {
     const from = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     const to = new Date(Date.now() + 60_000).toISOString();
     const [sales, purchases, expenses, losses] = await Promise.all([
-      storage.querySales(SHOP_ID, { from, to }),
-      storage.queryPurchases(SHOP_ID, { from, to }),
-      storage.queryExpenses(SHOP_ID, { from, to }),
-      storage.queryLosses(SHOP_ID, { from, to }),
+      storage.querySales(authenticatedPrincipal(response).shopId, { from, to }),
+      storage.queryPurchases(authenticatedPrincipal(response).shopId, { from, to }),
+      storage.queryExpenses(authenticatedPrincipal(response).shopId, { from, to }),
+      storage.queryLosses(authenticatedPrincipal(response).shopId, { from, to }),
     ]);
     response.json({ sales, purchases, expenses, losses });
   } catch (error) { next(error); }
@@ -159,9 +286,11 @@ app.post("/api/parse", async (request, response, next) => {
       response.status(400).json({ error: "A valid conversation session ID is required." });
       return;
     }
-    const context = sessionId ? conversationMemory.getContext(sessionId) : conversationContext(request.body?.context);
-    if (sessionId) conversationMemory.remember(sessionId, transcript);
-    const result = await business.parseTranscript(transcript, source, preferredLanguage, context);
+    const principal = authenticatedPrincipal(response);
+    const scopedSessionId = sessionId ? `${principal.shopId}:${sessionId}` : null;
+    const context = scopedSessionId ? conversationMemory.getContext(scopedSessionId) : conversationContext(request.body?.context);
+    if (scopedSessionId) conversationMemory.remember(scopedSessionId, transcript);
+    const result = await businessForShop(principal.shopId).parseTranscript(transcript, source, preferredLanguage, context);
     response.json(result);
   } catch (error) { next(error); }
 });
@@ -172,8 +301,9 @@ app.post("/api/conversation/reset", (request, response) => {
     response.status(400).json({ error: "A valid conversation session ID is required." });
     return;
   }
-  conversationMemory.clear(sessionId);
-  log("conversation", "short-term context cleared", { sessionId });
+  const principal = authenticatedPrincipal(response);
+  conversationMemory.clear(`${principal.shopId}:${sessionId}`);
+  log("conversation", "short-term context cleared", { shopId: principal.shopId });
   response.json({ ok: true });
 });
 
@@ -181,20 +311,20 @@ app.post("/api/confirm", async (request, response, next) => {
   try {
     const pendingId = typeof request.body?.pendingId === "string" ? request.body.pendingId : "";
     if (!pendingId) { response.status(400).json({ error: "A pending confirmation ID is required." }); return; }
-    const result = await business.confirm(pendingId);
+    const result = await businessForShop(authenticatedPrincipal(response).shopId).confirm(pendingId);
     response.json(result);
   } catch (error) { next(error); }
 });
 
 app.post("/api/cancel", (request, response) => {
   const pendingId = typeof request.body?.pendingId === "string" ? request.body.pendingId : "";
-  if (pendingId) business.cancel(pendingId);
+  if (pendingId) businessForShop(authenticatedPrincipal(response).shopId).cancel(pendingId);
   response.json({ ok: true });
 });
 
 app.post("/api/manual/:kind", async (request, response, next) => {
   try {
-    const result = await business.recordManual(request.params.kind, request.body);
+    const result = await businessForShop(authenticatedPrincipal(response).shopId).recordManual(request.params.kind, request.body);
     response.status(201).json(result);
   } catch (error) { next(error); }
 });
@@ -206,7 +336,7 @@ app.use((_request, response) => {
 const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
   const message = error instanceof Error ? error.message : "Unexpected server error";
   const parserStatus = typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : null;
-  const status = error instanceof SpeechServiceError
+  const status = error instanceof SpeechServiceError || error instanceof AuthError
     ? error.statusCode
     : parserStatus && parserStatus >= 400 && parserStatus < 500
       ? parserStatus
@@ -224,7 +354,6 @@ async function start(): Promise<void> {
       STORAGE_DRIVER: process.env.STORAGE_DRIVER ?? "mongo",
       LLM_PROVIDER: process.env.LLM_PROVIDER ?? "rules",
       PORT,
-      SHOP_ID,
     });
   });
 }

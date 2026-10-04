@@ -3,6 +3,7 @@ export type EntryKind = "sale" | "purchase" | "expense" | "loss" | "product";
 export type ExpenseCategory = "rent" | "electricity" | "transport" | "staff" | "misc";
 export type PaymentMethod = "cash" | "upi" | "credit";
 
+export interface AuthUser { id: string; email: string; ownerName: string; shopName: string; }
 export interface Product {
   id: string; shopId: string; name: string; aliases: string[]; category: string; unit: string;
   sellPrice: number; costPrice: number; createdAt: string; updatedAt: string;
@@ -43,7 +44,7 @@ export interface DashboardData {
   recentActivity: Activity[];
   topProducts: Array<{ productId: string; name: string; qty: number; revenue: number }>;
 }
-export interface Health { ok: boolean; service: string; storage: string; shopId: string; }
+export interface Health { ok: boolean; service: string; storage: string; }
 export type SpeechProviderName = "elevenlabs" | "deepgram" | "sherpa-onnx";
 export interface SpeechStatus {
   stt: { available: boolean; engine: SpeechProviderName | null; providers: SpeechProviderName[] };

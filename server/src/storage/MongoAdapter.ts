@@ -21,7 +21,7 @@ import type {
   SettingsUpdate,
   TimeFilter,
 } from "../types.js";
-import type { StorageAdapter } from "./StorageAdapter.js";
+import type { StorageAdapter, StoredAuthSession, StoredUserAccount } from "./StorageAdapter.js";
 
 type Doc = { _id?: string; [key: string]: any };
 
@@ -77,6 +77,10 @@ export class MongoAdapter implements StorageAdapter {
       this.db.collection("purchases").createIndex({ shopId: 1, timestamp: -1 }),
       this.db.collection("expenses").createIndex({ shopId: 1, timestamp: -1 }),
       this.db.collection("losses").createIndex({ shopId: 1, timestamp: -1 }),
+      this.db.collection("users").createIndex({ email: 1 }, { unique: true }),
+      this.db.collection("sessions").createIndex({ tokenHash: 1 }, { unique: true }),
+      this.db.collection("sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      this.db.collection("sessions").createIndex({ userId: 1 }),
     ]);
     log("storage:mongo", `connected to database=\"${this.dbName}\"`);
   }
@@ -89,6 +93,45 @@ export class MongoAdapter implements StorageAdapter {
   private collection(name: string) {
     if (!this.db) throw new Error("MongoDB is not connected");
     return this.db.collection<Doc>(name);
+  }
+
+  async createUser(user: StoredUserAccount): Promise<void> {
+    try {
+      await this.collection("users").insertOne({ ...user, _id: user.id });
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) {
+        throw new Error("Email is already registered.");
+      }
+      throw error;
+    }
+  }
+
+  async findUserByEmail(email: string): Promise<StoredUserAccount | null> {
+    const document = await this.collection("users").findOne({ email });
+    return document ? withoutMongoId<StoredUserAccount>(document) : null;
+  }
+
+  async findUserById(userId: string): Promise<StoredUserAccount | null> {
+    const document = await this.collection("users").findOne({ id: userId });
+    return document ? withoutMongoId<StoredUserAccount>(document) : null;
+  }
+
+  async deleteUserById(userId: string): Promise<void> {
+    await this.collection("users").deleteOne({ id: userId });
+    await this.collection("sessions").deleteMany({ userId });
+  }
+
+  async createAuthSession(session: StoredAuthSession): Promise<void> {
+    await this.collection("sessions").insertOne({ ...session, _id: session.id });
+  }
+
+  async findAuthSessionByTokenHash(tokenHash: string): Promise<StoredAuthSession | null> {
+    const document = await this.collection("sessions").findOne({ tokenHash });
+    return document ? withoutMongoId<StoredAuthSession>(document) : null;
+  }
+
+  async deleteAuthSessionByTokenHash(tokenHash: string): Promise<void> {
+    await this.collection("sessions").deleteOne({ tokenHash });
   }
 
   private warnStandaloneWrites(): void {

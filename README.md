@@ -1,10 +1,10 @@
 # Dukaandaar — Voice-first shop companion
 
-A full-stack TypeScript prototype for a small shop. Record sales, purchases, expenses, stock losses, and products by chat/voice or manual forms. The dashboard reports daily and weekly activity, stock health, and inventory-based profit.
+A full-stack TypeScript app for a small shop. Owners can create an account and a private shop workspace, then record sales, purchases, expenses, stock losses, and products by chat/voice or manual forms. The dashboard reports daily and weekly activity, stock health, and inventory-based profit.
 
 ## Projects
 
-`client/` and `server/` are independent applications with their own package manifests and dependencies. They share no runtime code or types. The Vite dev server proxies `/api` to the Express server so the browser uses same-origin relative requests. When hosting them separately, set `VITE_API_BASE_URL` in `client/.env` to the Express API origin (see `client/.env.example`).
+`client/` and `server/` are independent applications with their own package manifests and dependencies. They share no runtime code or types. The Vite dev server proxies `/api` to the Express server so the browser uses same-origin relative requests. When hosting them separately, set `VITE_API_BASE_URL` in `client/.env` to the Express API origin and `CLIENT_ORIGIN` on the server; keep client and API on the same site for the `SameSite=Lax` session cookie (see `client/.env.example`).
 
 ## Run locally (two terminals)
 
@@ -21,7 +21,13 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL (normally `http://localhost:5173`). The API uses persistent MongoDB by default and never seeds data during startup. Start/configure MongoDB first; run `cd server && npm run seed` only if you want demo fixtures (this is a destructive reset for the configured shop).
+Open the Vite URL (normally `http://localhost:5173`) and create an account from the landing page. The API uses persistent MongoDB by default and never seeds data during startup. Each signup receives a fresh, isolated shop that starts empty; any existing records under the legacy `SHOP_ID` remain untouched and are not attached to new accounts. Start/configure MongoDB first. The explicit `npm run seed` command still resets only the legacy `SHOP_ID` demo shop; its records are not visible to newly registered accounts.
+
+## Accounts and access
+
+The public landing page links to signup and login. Signup collects an owner name, shop name, email, and password; each account owns a new shop ID and all shop APIs scope reads and writes to the authenticated account. Existing single-shop data is deliberately left untouched and unclaimed. Emails are unique. Passwords are stored as salted scrypt hashes (never returned to the client), and sessions use random server-side tokens stored only as hashes in MongoDB with a 30-day expiry. The browser receives only an `HttpOnly`, `SameSite=Lax` session cookie; logout revokes it. MongoDB stores accounts, sessions, settings, and shop records. `STORAGE_DRIVER=memory` is development-only and loses all accounts/sessions when the API stops.
+
+For production, serve the app over HTTPS and set `CLIENT_ORIGIN` to the exact frontend origin(s) allowed to use the credentialed API. The session cookie is marked `Secure` when `NODE_ENV=production`. This simple auth flow does not include email verification or password reset.
 
 ## LLM and rule-based parsing
 
@@ -29,7 +35,7 @@ The same structured intent schema is used for all providers. Choose `LLM_PROVIDE
 
 ## Storage
 
-- MongoDB is the default storage driver. Set `STORAGE_DRIVER=mongo`, `MONGODB_URI`, `MONGODB_DB`, and `SHOP_ID` in `server/.env`; the default URI targets local MongoDB. Stored data remains across API restarts.
+- MongoDB is the default storage driver. Set `STORAGE_DRIVER=mongo`, `MONGODB_URI`, and `MONGODB_DB` in `server/.env`; the default URI targets local MongoDB. Stored data remains across API restarts. `SHOP_ID` names only the legacy/demo fixture shop; each account-created shop uses a separately generated ID.
 - A single-node MongoDB replica set is recommended for full multi-document transaction atomicity. Configure `replication.replSetName: rs0`, restart MongoDB, and run `mongosh --eval "rs.initiate()"` once. The default local URI works with either standalone MongoDB or a replica set; Atlas works with its supplied connection string. The app detects standalone MongoDB and uses guarded writes with compensating rollback, so routine writes do not fail with the replica-set transaction error. Standalone mode cannot guarantee multi-document atomicity if the process or server stops mid-write; use a replica set for that guarantee.
 - API startup connects to storage but never seeds or resets it. To load demo fixtures manually, run `cd server && npm run seed`; this deletes and recreates data for the configured `SHOP_ID`. Do not run it against data you want to keep. Seeding also has a non-transactional fallback for standalone MongoDB.
 - `GET /api/health` reports the active storage driver. `STORAGE_DRIVER=memory` remains available only as an explicit, volatile option; it is not persistent and is not auto-seeded.

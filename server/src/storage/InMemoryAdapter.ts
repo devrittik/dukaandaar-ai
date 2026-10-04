@@ -20,7 +20,7 @@ import type {
   SettingsUpdate,
   TimeFilter,
 } from "../types.js";
-import type { StorageAdapter } from "./StorageAdapter.js";
+import type { StorageAdapter, StoredAuthSession, StoredUserAccount } from "./StorageAdapter.js";
 
 function normalize(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim();
@@ -41,6 +41,8 @@ export class InMemoryAdapter implements StorageAdapter {
   private expenses = new Map<string, Expense>();
   private losses = new Map<string, Loss>();
   private settings = new Map<string, Settings>();
+  private users = new Map<string, StoredUserAccount>();
+  private authSessions = new Map<string, StoredAuthSession>();
 
   async connect(): Promise<void> {
     log("storage:memory", "ready (process-local, no persistence)");
@@ -48,6 +50,43 @@ export class InMemoryAdapter implements StorageAdapter {
 
   async disconnect(): Promise<void> {
     log("storage:memory", "disconnected");
+  }
+
+  async createUser(user: StoredUserAccount): Promise<void> {
+    if ([...this.users.values()].some((saved) => saved.email === user.email)) throw new Error("Email is already registered.");
+    this.users.set(user.id, structuredClone(user));
+  }
+
+  async findUserByEmail(email: string): Promise<StoredUserAccount | null> {
+    const user = [...this.users.values()].find((saved) => saved.email === email);
+    return user ? structuredClone(user) : null;
+  }
+
+  async findUserById(userId: string): Promise<StoredUserAccount | null> {
+    const user = this.users.get(userId);
+    return user ? structuredClone(user) : null;
+  }
+
+  async deleteUserById(userId: string): Promise<void> {
+    this.users.delete(userId);
+    for (const [sessionId, session] of this.authSessions) {
+      if (session.userId === userId) this.authSessions.delete(sessionId);
+    }
+  }
+
+  async createAuthSession(session: StoredAuthSession): Promise<void> {
+    this.authSessions.set(session.id, structuredClone(session));
+  }
+
+  async findAuthSessionByTokenHash(tokenHash: string): Promise<StoredAuthSession | null> {
+    const session = [...this.authSessions.values()].find((saved) => saved.tokenHash === tokenHash);
+    return session ? structuredClone(session) : null;
+  }
+
+  async deleteAuthSessionByTokenHash(tokenHash: string): Promise<void> {
+    for (const [sessionId, session] of this.authSessions) {
+      if (session.tokenHash === tokenHash) this.authSessions.delete(sessionId);
+    }
   }
 
   async seed(): Promise<void> {

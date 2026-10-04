@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { Activity, AlertTriangle, ArrowDownToLine, BarChart3, Bell, Boxes, ChevronDown, CircleDollarSign, CircleHelp, DollarSign, Home, Menu, Package, PackagePlus, Plus, ReceiptText, Settings, ShoppingBag, Sparkles, Store, Truck, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowDownToLine, BarChart3, Bell, Boxes, ChevronDown, CircleDollarSign, CircleHelp, DollarSign, Home, LogOut, Menu, Package, PackagePlus, Plus, ReceiptText, Settings, ShoppingBag, Sparkles, Store, Truck, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { api } from "./api/client";
+import { api, ApiError, AUTH_SESSION_EXPIRED_EVENT } from "./api/client";
 import { AssistantPanel } from "./components/AssistantPanel";
 import { ActivityList, InventorySummary, InventoryTable, LowStockPanel, MetricCard, MoneyBreakdown, ProfitExplainer, TopProducts, WeeklyChart } from "./components/DashboardWidgets";
 import { ManualEntryDialog } from "./components/ManualEntryDialog";
 import { EditProductDialog } from "./components/EditProductDialog";
 import { ShopSettingsPage } from "./components/ShopSettingsPage";
 import { TransactionsPage } from "./components/TransactionsPage";
+import { LandingPage } from "./components/LandingPage";
+import { AuthPage, type AuthPageMode } from "./components/AuthPage";
 import { Badge } from "./components/ui/Badge";
 import { Button } from "./components/ui/Button";
 import { Card } from "./components/ui/Card";
-import type { ChatMessage, DashboardData, EntryKind, Health, ProductInventory, TransactionsResponse } from "./types";
+import type { AuthUser, ChatMessage, DashboardData, EntryKind, Health, ProductInventory, TransactionsResponse } from "./types";
 import { uiText } from "./locales";
 import { formatCurrency } from "./utils";
 
@@ -143,6 +145,9 @@ export default function App() {
   const [view, setView] = useState<View>("Assistant");
   const [conversationSessionId, setConversationSessionId] = useState<string>(getConversationSessionId);
   const [assistantMessages, setAssistantMessages] = useState<ChatMessage[]>(() => [{ id: "welcome", role: "assistant", text: uiText("en", "welcome"), meta: uiText("en", "yourAssistant") }]);
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authPage, setAuthPage] = useState<"landing" | AuthPageMode>("landing");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [transactions, setTransactions] = useState<TransactionsResponse | null>(null);
@@ -160,18 +165,51 @@ export default function App() {
       console.log("[dashboard] loading current shop data");
       const [nextDashboard, nextHealth] = await Promise.all([api.dashboard(), api.health()]);
       setDashboard(nextDashboard); setHealth(nextHealth); setError("");
-      if (view === "Transactions") setTransactions(await api.transactions());
       console.log("[dashboard] data ready", { products: nextDashboard.products.length, transactions: nextDashboard.counts.transactionsToday });
     } catch (caught) {
       console.error("[dashboard] refresh failed", caught);
       setError(caught instanceof Error ? caught.message : "The server is unavailable.");
+      if (caught instanceof ApiError && caught.status === 401) {
+        setAuthUser(null);
+        setAuthPage("login");
+        setDashboard(null); setHealth(null); setTransactions(null);
+      }
     } finally { setLoading(false); }
-  }, [view]);
+  }, []);
 
-  useEffect(() => { void refresh(true); }, []);
   useEffect(() => {
-    if (view === "Transactions") void api.transactions().then(setTransactions).catch((caught) => console.error("[transactions] load failed", caught));
-  }, [view]);
+    let active = true;
+    void api.currentUser().then((user) => {
+      if (active) setAuthUser(user);
+    }).catch((caught) => {
+      console.warn("[auth] could not restore the saved sign-in", caught);
+      if (active) setAuthUser(null);
+    }).finally(() => {
+      if (active) setAuthReady(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const expireSession = () => {
+      setAuthUser(null); setAuthPage("login"); setDashboard(null); setHealth(null); setTransactions(null); setError("");
+    };
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, expireSession);
+    return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, expireSession);
+  }, []);
+
+  useEffect(() => {
+    if (authUser) void refresh(true);
+    else if (authReady) {
+      setDashboard(null); setHealth(null); setTransactions(null); setError(""); setLoading(false);
+    }
+  }, [authReady, authUser, refresh]);
+
+  useEffect(() => {
+    if (authUser && view === "Transactions") {
+      void api.transactions().then(setTransactions).catch((caught) => console.error("[transactions] load failed", caught));
+    }
+  }, [view, authUser]);
 
   const openEntry = (kind: EntryKind, initialData?: Record<string, unknown>) => { console.log(`[manual] open entry kind=${kind}${initialData ? " with parsed values" : ""}`); setEntryKind(kind); setEntryInitialData(initialData ?? null); setEntryOpen(true); };
   const savedEntry = (message: string) => {
@@ -180,7 +218,26 @@ export default function App() {
     void refresh();
   };
   const handleNavigate = (next: View) => { console.log(`[navigation] ${view} -> ${next}`); setView(next); setMobileNav(false); };
+  const handleAuthenticated = (user: AuthUser) => {
+    setAuthUser(user); setAuthPage("landing"); setView("Assistant");
+    setDashboard(null); setHealth(null); setTransactions(null); setError(""); setLoading(true);
+    setAssistantMessages([{ id: "welcome", role: "assistant", text: uiText("en", "welcome"), meta: uiText("en", "yourAssistant") }]);
+    setConversationSessionId(rotateConversationSessionId());
+  };
+  const handleLogout = async () => {
+    try { await api.logout(); }
+    catch (caught) { console.warn("[auth] logout request failed; clearing this browser session", caught); }
+    setAuthUser(null); setAuthPage("landing"); setDashboard(null); setHealth(null); setTransactions(null); setError("");
+    setAssistantMessages([{ id: "welcome", role: "assistant", text: uiText("en", "welcome"), meta: uiText("en", "yourAssistant") }]);
+    setConversationSessionId(rotateConversationSessionId());
+  };
   const pageDate = useMemo(() => new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" }).format(new Date()), []);
+
+  if (!authReady) return <div className="grid min-h-screen place-items-center bg-[#f5f7f4] px-5"><div className="text-center"><span className="mx-auto grid h-12 w-12 animate-pulse place-items-center rounded-[17px] bg-primary text-white"><Store size={21} /></span><p className="mt-4 text-sm font-semibold text-ink">Preparing your shop space…</p></div></div>;
+  if (!authUser) {
+    if (authPage === "landing") return <LandingPage onSignUp={() => setAuthPage("signup")} onLogin={() => setAuthPage("login")} />;
+    return <AuthPage mode={authPage} onModeChange={setAuthPage} onBack={() => setAuthPage("landing")} onAuthenticated={handleAuthenticated} />;
+  }
 
   const sidebar = <Sidebar view={view} setView={handleNavigate} shopName={dashboard?.shop.name ?? "Shop"} ownerName={dashboard?.shop.ownerName ?? "Shop owner"} health={health} productCount={dashboard?.counts.products ?? 0} />;
   return <div className="min-h-screen bg-surface-subtle text-ink">
@@ -188,7 +245,7 @@ export default function App() {
     <div className="min-h-screen lg:pl-[246px]">
       <header className="sticky top-0 z-30 flex h-[62px] items-center justify-between border-b border-line/90 bg-surface-subtle/95 px-4 backdrop-blur-xl sm:px-7 lg:px-9">
         <div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-xl bg-primary text-white lg:hidden"><Store size={16} /></div><button type="button" className="hidden text-xs font-medium text-muted hover:text-ink sm:block" onClick={() => handleNavigate("Overview")}>Workspace <span className="px-1.5 text-line">/</span><span className="font-semibold text-ink-soft">{view}</span></button><span className="text-xs font-semibold text-ink sm:hidden">{view}</span></div>
-        <div className="flex items-center gap-2.5"><span className="hidden items-center gap-1.5 rounded-full border border-line bg-white px-3 py-1.5 text-[10px] font-medium text-ink-soft sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-primary" />{health?.storage === "mongo" ? "MongoDB connected" : "In-memory mode"}</span><button type="button" className="relative grid h-9 w-9 place-items-center rounded-xl text-muted transition hover:bg-white hover:text-ink" aria-label="Notifications"><Bell size={17} /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber" /></button><div className="hidden h-7 w-px bg-line sm:block"/><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-xl bg-avatar text-[10px] font-bold text-avatar-ink">{(dashboard?.shop.ownerName || "Shop owner").split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</div><div className="hidden sm:block"><p className="text-[11px] font-bold text-ink">{dashboard?.shop.ownerName || "Shop owner"}</p><p className="text-[9px] text-muted">Shop owner</p></div><ChevronDown size={13} className="hidden text-muted sm:block" /></div><button type="button" onClick={() => setMobileNav((current) => !current)} className="grid h-9 w-9 place-items-center rounded-xl text-ink-soft hover:bg-white lg:hidden" aria-label="Open menu">{mobileNav ? <X size={18} /> : <Menu size={18} />}</button></div>
+        <div className="flex items-center gap-2.5"><span className="hidden items-center gap-1.5 rounded-full border border-line bg-white px-3 py-1.5 text-[10px] font-medium text-ink-soft sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-primary" />{health?.storage === "mongo" ? "MongoDB connected" : "In-memory mode"}</span><button type="button" className="relative grid h-9 w-9 place-items-center rounded-xl text-muted transition hover:bg-white hover:text-ink" aria-label="Notifications"><Bell size={17} /><span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-amber" /></button><div className="hidden h-7 w-px bg-line sm:block"/><div className="flex items-center gap-2"><div className="grid h-8 w-8 place-items-center rounded-xl bg-avatar text-[10px] font-bold text-avatar-ink">{(dashboard?.shop.ownerName || "Shop owner").split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</div><div className="hidden sm:block"><p className="text-[11px] font-bold text-ink">{dashboard?.shop.ownerName || "Shop owner"}</p><p className="text-[9px] text-muted">Shop owner</p></div><ChevronDown size={13} className="hidden text-muted sm:block" /></div><button type="button" onClick={() => void handleLogout()} title="Sign out" aria-label="Sign out" className="inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2 text-muted transition hover:bg-white hover:text-primary sm:px-3"><LogOut size={15} /><span className="hidden text-[10px] font-semibold sm:inline">Sign out</span></button><button type="button" onClick={() => setMobileNav((current) => !current)} className="grid h-9 w-9 place-items-center rounded-xl text-ink-soft hover:bg-white lg:hidden" aria-label="Open menu">{mobileNav ? <X size={18} /> : <Menu size={18} />}</button></div>
       </header>
       {mobileNav ? <div className="mobile-nav fixed inset-x-0 top-[62px] z-40 overflow-x-auto border-b border-line bg-white p-3 shadow-float lg:hidden"><div className="flex min-w-max gap-2">{navItems.map((item) => { const Icon = item.icon; return <button key={item.label} onClick={() => handleNavigate(item.label)} className={`flex min-w-[64px] flex-col items-center gap-1.5 whitespace-nowrap rounded-xl px-2 py-2 text-[10px] font-semibold ${view === item.label ? "bg-primary-light text-primary" : "text-muted"}`}><Icon size={17}/>{item.label}</button>; })}<button onClick={() => handleNavigate("Settings")} className={`flex min-w-[64px] flex-col items-center gap-1.5 whitespace-nowrap rounded-xl px-2 py-2 text-[10px] font-semibold ${view === "Settings" ? "bg-primary-light text-primary" : "text-muted"}`}><Settings size={17}/>Settings</button></div></div> : null}
       <main className="mx-auto max-w-[1600px] px-4 pb-10 pt-6 sm:px-6 lg:px-8 lg:pt-7">
