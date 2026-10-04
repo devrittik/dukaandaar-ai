@@ -284,7 +284,7 @@ The local models are optional and not included in the repository:
 - **STT:** compatible multilingual Sherpa-ONNX Whisper ONNX encoder, decoder, and tokens files; Whisper.cpp GGML `.bin` files cannot be used in their place.
 - **TTS:** the Sherpa-ONNX Supertonic bundle, including `duration_predictor.int8.onnx`, `text_encoder.int8.onnx`, `vector_estimator.int8.onnx`, `vocoder.int8.onnx`, `tts.json`, `unicode_indexer.bin`, and `voice.bin`.
 
-Configure file paths and provider keys in `server/.env`. See [`server/.env.example`](server/.env.example), [`server/.env.production.example`](server/.env.production.example), and the [Sherpa-ONNX speech documentation](https://k2-fsa.github.io/sherpa/onnx/).
+For Hindi STT, select **हिन्दी** in the Assistant; the UI sends `hi-IN` and the server converts that to Whisper's `hi` language code. Leave `SHERPA_ONNX_WHISPER_LANGUAGE` blank to follow the UI, set it to `hi` to force Hindi, or set it to `auto` to ask a compatible multilingual model to detect the language. `VOICE_STT_LANGUAGE` is only a hosted-provider override and does not override local Sherpa. Use a multilingual Whisper model, not an English-only `.en` model. Configure file paths and provider keys in `server/.env`. See [`server/.env.example`](server/.env.example), [`server/.env.production.example`](server/.env.production.example), and the [Sherpa-ONNX speech documentation](https://k2-fsa.github.io/sherpa/onnx/).
 
 ## Runtime configuration and deployment
 

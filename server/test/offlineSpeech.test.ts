@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { getSpeechStatus, SpeechServiceError, synthesizeSpeech, transcribeWav } from "../src/services/offlineSpeech.js";
+import { getSpeechStatus, resolveSherpaWhisperLanguage, SpeechServiceError, synthesizeSpeech, transcribeWav } from "../src/services/offlineSpeech.js";
 
 const CONFIG_KEYS = [
   "VOICE_MODE", "SHERPA_ONNX_WHISPER_ENCODER_PATH", "SHERPA_ONNX_WHISPER_DECODER_PATH", "SHERPA_ONNX_WHISPER_TOKENS_PATH", "SHERPA_ONNX_WHISPER_LANGUAGE",
@@ -64,6 +64,18 @@ async function captureSpeechError(action: () => Promise<unknown>): Promise<Speec
   }
   assert.fail("Expected a SpeechServiceError");
 }
+
+test("Sherpa follows the selected app language unless its dedicated override is set", async () => {
+  await withEnvironment({ VOICE_STT_LANGUAGE: "en", SHERPA_ONNX_WHISPER_LANGUAGE: "" }, async () => {
+    assert.equal(resolveSherpaWhisperLanguage("hi-IN"), "hi");
+  });
+  await withEnvironment({ VOICE_STT_LANGUAGE: "en", SHERPA_ONNX_WHISPER_LANGUAGE: "hi-IN" }, async () => {
+    assert.equal(resolveSherpaWhisperLanguage("en-IN"), "hi");
+  });
+  await withEnvironment({ VOICE_STT_LANGUAGE: "en", SHERPA_ONNX_WHISPER_LANGUAGE: "auto" }, async () => {
+    assert.equal(resolveSherpaWhisperLanguage("hi-IN"), "");
+  });
+});
 
 test("VOICE_MODE isolates the hosted and local provider chains", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dukaandaar-speech-mode-test-"));

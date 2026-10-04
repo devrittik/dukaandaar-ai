@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Banknote, Boxes, ChevronRight, CircleDollarSign, Clock3, Package, Pencil, ReceiptText, ShoppingBag, TrendingDown, TrendingUp, Truck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Activity, DashboardData, DailyPoint, ProductInventory } from "../types";
@@ -86,29 +86,72 @@ function StockStatus({ status, quantity, threshold }: { status: ProductInventory
 }
 
 export function InventoryTable({ products, compact = false, onAddProduct, onEditProduct }: { products: ProductInventory[]; compact?: boolean; onAddProduct?: () => void; onEditProduct?: (product: ProductInventory) => void }) {
-  const shown = compact ? products.slice(0, 6) : products;
+  const pageSize = 6;
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(products.length / pageSize));
+  const activePage = compact ? 0 : Math.min(page, pageCount - 1);
+  const shown = compact ? products.slice(0, pageSize) : products.slice(activePage * pageSize, (activePage + 1) * pageSize);
+  const firstShown = shown.length ? activePage * pageSize + 1 : 0;
+  const lastShown = activePage * pageSize + shown.length;
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
   return <Card className="overflow-hidden !p-0">
     <div className="flex items-center justify-between gap-3 px-5 py-4 sm:px-6">
       <div><div className="flex items-center gap-2"><h2 className="font-display text-[16px] font-bold text-ink">Product inventory</h2><Badge tone="gray">{products.length}</Badge></div><p className="mt-1 text-xs text-muted">On-hand stock and current retail price</p></div>
-      <div className="flex items-center gap-2">{onAddProduct ? <Button size="sm" variant="secondary" onClick={onAddProduct}><Package size={14} />Add product</Button> : null}{compact ? <span className="hidden text-xs font-semibold text-primary sm:inline">All products <ChevronRight size={14} className="inline" /></span> : null}</div>
+      <div className="flex items-center gap-2">{!compact && onAddProduct ? <Button size="sm" variant="secondary" onClick={onAddProduct}><Package size={14} />Add product</Button> : null}</div>
     </div>
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[980px] border-collapse text-left">
-        <thead><tr className="border-y border-line bg-surface-subtle/60 text-[10px] uppercase tracking-[.1em] text-muted"><th className="px-5 py-3 font-semibold sm:px-6">Product</th><th className="px-3 py-3 font-semibold">Category</th><th className="px-3 py-3 font-semibold">In stock</th><th className="px-3 py-3 font-semibold">Cost</th><th className="px-3 py-3 font-semibold">Sell price</th><th className="px-3 py-3 font-semibold">Stock alert at</th><th className="px-3 py-3 font-semibold">Status</th>{onEditProduct ? <th className="px-5 py-3 text-right font-semibold sm:px-6">Edit</th> : null}</tr></thead>
+
+    {/* On narrow and medium screens use labeled cards so every field and the edit action stays visible. */}
+    <div className={compact ? "divide-y divide-line border-t border-line" : "divide-y divide-line border-t border-line 2xl:hidden"}>
+      {shown.map((product) => <article key={product.id} className="px-4 py-4 sm:px-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <CategoryIcon category={product.category} />
+            <div className="min-w-0"><h3 className="break-words text-[13px] font-semibold text-ink">{product.name}</h3><p className="mt-0.5 break-words text-[10px] text-muted">{product.unit}{product.aliases.length ? ` · ${product.aliases.slice(0, 2).join(", ")}` : ""}</p></div>
+          </div>
+          {onEditProduct ? <Button size="sm" variant="outline" className="shrink-0" onClick={() => onEditProduct(product)}><Pencil size={13} />Edit</Button> : null}
+        </div>
+        <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3 sm:grid-cols-4">
+          <div><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">Category</dt><dd className="mt-1 break-words text-xs text-ink-soft">{product.category}</dd></div>
+          <div><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">In stock</dt><dd className="mt-1 break-words text-xs font-semibold tabular-nums text-ink">{formatNumber(product.quantityOnHand)} {product.unit}</dd></div>
+          <div><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">Cost</dt><dd className="mt-1 break-all text-xs tabular-nums text-ink-soft">{formatCurrency(product.costPrice)}</dd></div>
+          <div><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">Sell price</dt><dd className="mt-1 break-all text-xs font-semibold tabular-nums text-ink">{formatCurrency(product.sellPrice)}</dd></div>
+          {!compact ? <div><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">Stock alert at</dt><dd className="mt-1 break-words text-xs tabular-nums text-ink-soft">{formatNumber(product.lowStockThreshold)} {product.unit}</dd></div> : null}
+          {!compact ? <div className="col-span-2 sm:col-span-3"><dt className="text-[9px] font-semibold uppercase tracking-wide text-muted">Status</dt><dd className="mt-1"><StockStatus status={product.status} quantity={product.quantityOnHand} threshold={product.lowStockThreshold} /></dd></div> : null}
+        </dl>
+      </article>)}
+    </div>
+
+    {!compact ? <div className="hidden 2xl:block">
+      <table className="w-full table-fixed border-collapse text-left">
+        <colgroup><col style={{ width: "21%" }} /><col style={{ width: "12%" }} /><col style={{ width: "11%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "13%" }} /><col style={{ width: "15%" }} /><col style={{ width: "10%" }} /></colgroup>
+        <thead><tr className="border-y border-line bg-surface-subtle/60 text-[9px] uppercase tracking-[.08em] text-muted"><th className="px-3 py-3 font-semibold">Product</th><th className="px-2 py-3 font-semibold">Category</th><th className="px-2 py-3 font-semibold">In stock</th><th className="px-2 py-3 font-semibold">Cost</th><th className="px-2 py-3 font-semibold">Sell price</th><th className="px-2 py-3 font-semibold">Stock alert at</th><th className="px-2 py-3 font-semibold">Status</th>{onEditProduct ? <th className="px-2 py-3 text-right font-semibold">Edit</th> : <th className="px-2 py-3" />}</tr></thead>
         <tbody>{shown.map((product) => <tr key={product.id} className="group border-b border-line/80 last:border-b-0 hover:bg-surface-subtle/40">
-          <td className="px-5 py-3.5 sm:px-6"><div className="flex items-center gap-3"><CategoryIcon category={product.category} /><div className="min-w-0"><p className="truncate text-[13px] font-semibold text-ink">{product.name}</p><p className="mt-0.5 truncate text-[10px] text-muted">{product.unit} · {product.aliases.slice(0, 2).join(", ")}</p></div></div></td>
-          <td className="px-3 py-3.5 text-xs text-ink-soft">{product.category}</td>
-          <td className="px-3 py-3.5"><span className="font-semibold tabular-nums text-ink">{formatNumber(product.quantityOnHand)}</span><span className="ml-1 text-[10px] text-muted">{product.unit}</span></td>
-          <td className="px-3 py-3.5 text-xs tabular-nums text-ink-soft">{formatCurrency(product.costPrice)}</td>
-          <td className="px-3 py-3.5 text-xs font-semibold tabular-nums text-ink">{formatCurrency(product.sellPrice)}</td>
-          <td className="px-3 py-3.5 text-xs tabular-nums text-ink-soft">{formatNumber(product.lowStockThreshold)} {product.unit}</td>
-          <td className="px-3 py-3.5"><StockStatus status={product.status} quantity={product.quantityOnHand} threshold={product.lowStockThreshold} /></td>
-          {onEditProduct ? <td className="px-5 py-3.5 text-right sm:px-6"><Button size="sm" variant="outline" onClick={() => onEditProduct(product)}><Pencil size={13} />Edit</Button></td> : null}
+          <td className="px-3 py-3.5"><div className="flex min-w-0 items-start gap-2"><CategoryIcon category={product.category} /><div className="min-w-0" style={{ overflowWrap: "anywhere" }}><p className="text-xs font-semibold text-ink">{product.name}</p><p className="mt-0.5 text-[9px] text-muted">{product.unit}{product.aliases.length ? ` · ${product.aliases.slice(0, 2).join(", ")}` : ""}</p></div></div></td>
+          <td className="px-2 py-3.5 text-[11px] text-ink-soft" style={{ overflowWrap: "anywhere" }}>{product.category}</td>
+          <td className="px-2 py-3.5 text-[11px] font-semibold tabular-nums text-ink" style={{ overflowWrap: "anywhere" }}>{formatNumber(product.quantityOnHand)} {product.unit}</td>
+          <td className="px-2 py-3.5 text-[11px] tabular-nums text-ink-soft" style={{ overflowWrap: "anywhere" }}>{formatCurrency(product.costPrice)}</td>
+          <td className="px-2 py-3.5 text-[11px] font-semibold tabular-nums text-ink" style={{ overflowWrap: "anywhere" }}>{formatCurrency(product.sellPrice)}</td>
+          <td className="px-2 py-3.5 text-[11px] tabular-nums text-ink-soft" style={{ overflowWrap: "anywhere" }}>{formatNumber(product.lowStockThreshold)} {product.unit}</td>
+          <td className="px-2 py-3.5" style={{ overflowWrap: "anywhere" }}><StockStatus status={product.status} quantity={product.quantityOnHand} threshold={product.lowStockThreshold} /></td>
+          <td className="px-2 py-3.5 text-right">{onEditProduct ? <Button size="sm" variant="outline" className="whitespace-nowrap" onClick={() => onEditProduct(product)}><Pencil size={13} />Edit</Button> : <span className="sr-only">No edit action</span>}</td>
         </tr>)}</tbody>
       </table>
-    </div>
+    </div> : null}
+
     {shown.length === 0 ? <div className="px-6 py-12 text-center text-sm text-muted">Your catalog is empty. Add your first product to begin.</div> : null}
     {compact && products.length > shown.length ? <div className="border-t border-line px-6 py-3 text-center text-[11px] font-semibold text-primary">Showing {shown.length} of {products.length} products</div> : null}
+    {!compact && products.length > 0 ? <div className="flex flex-col gap-3 border-t border-line px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <span className="text-[11px] text-muted">Showing {firstShown}–{lastShown} of {products.length} products</span>
+      <div className="flex items-center justify-between gap-3 sm:justify-end">
+        <Button size="sm" variant="outline" disabled={activePage === 0} onClick={() => setPage(activePage - 1)}>Previous</Button>
+        <span className="whitespace-nowrap text-[11px] font-semibold text-ink-soft">Page {activePage + 1} of {pageCount}</span>
+        <Button size="sm" variant="outline" disabled={activePage >= pageCount - 1} onClick={() => setPage(activePage + 1)}>Next</Button>
+      </div>
+    </div> : null}
   </Card>;
 }
 

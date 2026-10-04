@@ -174,8 +174,9 @@ function runProcess(command: string, args: string[], timeoutMs = processTimeoutM
   });
 }
 
-function sherpaWhisperLanguage(language: string): string {
-  const configured = envValue("SHERPA_ONNX_WHISPER_LANGUAGE") || envValue("VOICE_STT_LANGUAGE");
+/** Local Sherpa follows the selected app language unless its own variable explicitly overrides it. */
+export function resolveSherpaWhisperLanguage(language: string): string {
+  const configured = envValue("SHERPA_ONNX_WHISPER_LANGUAGE");
   if (configured.toLocaleLowerCase() === "auto") return "";
   const value = configured || language;
   const code = value.trim().split(/[-_]/)[0]?.toLocaleLowerCase() ?? "";
@@ -227,7 +228,7 @@ async function transcribeWithSherpaWav(wav: Buffer, language: string): Promise<s
     await writeFile(audioPath, wav, { mode: 0o600 });
     const result = await runProcess(process.execPath, [
       "-e", SHERPA_WHISPER_WORKER,
-      packageEntry, audioPath, model.encoder, model.decoder, model.tokens, sherpaWhisperLanguage(language),
+      packageEntry, audioPath, model.encoder, model.decoder, model.tokens, resolveSherpaWhisperLanguage(language),
     ]);
     const outputMarker = "DUKAANDAAR_STT_RESULT:";
     const markerIndex = result.stdout.lastIndexOf(outputMarker);

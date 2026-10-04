@@ -80,7 +80,7 @@ Server secrets belong in `server/.env`, never in website code or a settings scre
 
 ### Local speech models (optional)
 
-Sherpa-ONNX model weights are not included. Local speech-to-text needs a compatible multilingual Whisper **ONNX** encoder, decoder, and tokens file; Whisper.cpp GGML `.bin` files are not interchangeable. Local speech output uses the Sherpa-ONNX Supertonic model bundle. The Assistant can still be used by typing without these files. See [Speech pipeline](architecture.md#speech-pipeline) for the expected assets and hosted/local behavior.
+Sherpa-ONNX model weights are not included. Local speech-to-text needs a compatible multilingual Whisper **ONNX** encoder, decoder, and tokens file; Whisper.cpp GGML `.bin` files are not interchangeable. Local speech output uses the Sherpa-ONNX Supertonic model bundle. The Assistant can still be used by typing without these files. In the Assistant, select हिन्दी to request Hindi transcription; optionally set `SHERPA_ONNX_WHISPER_LANGUAGE=hi` to force Hindi, or `auto` to let a multilingual model detect it. See [Speech pipeline](architecture.md#speech-pipeline) for details.
 
 ## Shop data and administrator commands
 
