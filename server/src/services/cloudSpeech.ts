@@ -2,12 +2,17 @@ import { logWarn } from "../utils/logger.js";
 
 export type SpeechProviderName = "elevenlabs" | "deepgram" | "sherpa-onnx";
 export type SpeechCapability = "stt" | "tts";
+export type SpeechMode = "hosted" | "local";
 
 export interface ProviderAudio { audio: Buffer; contentType: string }
 
-const DEFAULT_PROVIDER_ORDER: SpeechProviderName[] = ["elevenlabs", "deepgram", "sherpa-onnx"];
-const PROVIDER_NAMES = new Set<SpeechProviderName>(DEFAULT_PROVIDER_ORDER);
+const DEFAULT_HOSTED_PROVIDER_ORDER = ["elevenlabs", "deepgram"] as const;
+const HOSTED_PROVIDER_NAMES = new Set<string>(DEFAULT_HOSTED_PROVIDER_ORDER);
 const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
+
+export function speechMode(): SpeechMode {
+  return envValue("VOICE_MODE", "local").toLocaleLowerCase() === "hosted" ? "hosted" : "local";
+}
 
 function envValue(name: string, fallback = ""): string {
   return (process.env[name] ?? fallback).trim();
@@ -41,22 +46,19 @@ function isConfigured(provider: SpeechProviderName, capability: SpeechCapability
 }
 
 export function activeSpeechProviders(capability: SpeechCapability, sherpaAvailable: boolean): SpeechProviderName[] {
+  if (speechMode() === "local") return sherpaAvailable ? ["sherpa-onnx"] : [];
+
   const orderVariable = capability === "stt" ? "VOICE_STT_PROVIDER_ORDER" : "VOICE_TTS_PROVIDER_ORDER";
-  const rawOrder = process.env[orderVariable] === undefined
-    ? DEFAULT_PROVIDER_ORDER.join(",")
-    : envValue(orderVariable);
-  const seen = new Set<SpeechProviderName>();
+  const rawOrder = envValue(orderVariable) || DEFAULT_HOSTED_PROVIDER_ORDER.join(",");
+  const seen = new Set<string>();
   const requestedOrder: SpeechProviderName[] = [];
   for (const rawProvider of rawOrder.split(",")) {
     const provider = rawProvider.trim().toLocaleLowerCase();
-    if (!PROVIDER_NAMES.has(provider as SpeechProviderName) || seen.has(provider as SpeechProviderName)) continue;
-    seen.add(provider as SpeechProviderName);
+    if (!HOSTED_PROVIDER_NAMES.has(provider) || seen.has(provider)) continue;
+    seen.add(provider);
     requestedOrder.push(provider as SpeechProviderName);
   }
-  return requestedOrder.filter((provider) => {
-    if (provider === "sherpa-onnx") return sherpaAvailable;
-    return isConfigured(provider, capability);
-  });
+  return requestedOrder.filter((provider) => isConfigured(provider, capability));
 }
 
 async function withProviderTimeout<T>(provider: string, capability: string, action: (signal: AbortSignal) => Promise<T>): Promise<T> {

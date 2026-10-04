@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { getSpeechStatus, SpeechServiceError, synthesizeSpeech, transcribeWav } from "../src/services/offlineSpeech.js";
 
 const CONFIG_KEYS = [
-  "SHERPA_ONNX_WHISPER_ENCODER_PATH", "SHERPA_ONNX_WHISPER_DECODER_PATH", "SHERPA_ONNX_WHISPER_TOKENS_PATH",
+  "VOICE_MODE", "SHERPA_ONNX_WHISPER_ENCODER_PATH", "SHERPA_ONNX_WHISPER_DECODER_PATH", "SHERPA_ONNX_WHISPER_TOKENS_PATH",
   "SHERPA_ONNX_TTS_MODEL_DIR", "VOICE_STT_PROVIDER_ORDER", "VOICE_TTS_PROVIDER_ORDER", "VOICE_STT_LANGUAGE",
   "ELEVENLABS_API_KEY", "ELEVENLABS_BASE_URL", "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_TTS_MODEL_ID",
   "ELEVENLABS_TTS_VOICE_ID", "ELEVENLABS_TTS_OUTPUT_FORMAT", "DEEPGRAM_API_KEY", "DEEPGRAM_BASE_URL",
@@ -49,6 +49,7 @@ function installFetch(mock: typeof fetch): void { globalThis.fetch = mock; }
 
 test("speech status exposes configured providers in env-defined order without exposing secrets", async () => {
   await withEnvironment({
+    VOICE_MODE: "hosted",
     ELEVENLABS_API_KEY: "secret-elevenlabs",
     ELEVENLABS_TTS_VOICE_ID: "voice-id",
     DEEPGRAM_API_KEY: "secret-deepgram",
@@ -89,7 +90,7 @@ test("STT falls from ElevenLabs to Deepgram and passes the selected language", a
       });
     }) as typeof fetch);
 
-    await withEnvironment({ ELEVENLABS_API_KEY: "eleven-key", DEEPGRAM_API_KEY: "deepgram-key" }, async () => {
+    await withEnvironment({ VOICE_MODE: "hosted", ELEVENLABS_API_KEY: "eleven-key", DEEPGRAM_API_KEY: "deepgram-key" }, async () => {
       const transcript = await transcribeWav(pcmWav(), "hi-IN");
       assert.equal(transcript, "नमस्ते दुकान");
       assert.equal(calls.length, 2);
@@ -112,7 +113,7 @@ test("TTS uses ElevenLabs WAV output and returns the provider content type", asy
       return new Response(audioBytes, { status: 200, headers: { "content-type": "audio/wav" } });
     }) as typeof fetch);
 
-    await withEnvironment({ ELEVENLABS_API_KEY: "eleven-key", ELEVENLABS_TTS_VOICE_ID: "voice-abc" }, async () => {
+    await withEnvironment({ VOICE_MODE: "hosted", ELEVENLABS_API_KEY: "eleven-key", ELEVENLABS_TTS_VOICE_ID: "voice-abc" }, async () => {
       const result = await synthesizeSpeech(" Hello there ", "en-IN");
       assert.equal(result.contentType, "audio/wav");
       assert.deepEqual(result.audio, audioBytes);
@@ -134,6 +135,7 @@ test("TTS falls from ElevenLabs to Deepgram when the preferred cloud provider fa
     }) as typeof fetch);
 
     await withEnvironment({
+      VOICE_MODE: "hosted",
       ELEVENLABS_API_KEY: "eleven-key",
       ELEVENLABS_TTS_VOICE_ID: "voice-abc",
       DEEPGRAM_API_KEY: "deepgram-key",
@@ -146,10 +148,10 @@ test("TTS falls from ElevenLabs to Deepgram when the preferred cloud provider fa
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("all configured cloud STT providers failing returns a service error when Sherpa is unavailable", async () => {
+test("hosted mode does not use Sherpa after configured cloud STT providers fail", async () => {
   try {
     installFetch((async () => new Response("unavailable", { status: 503 })) as typeof fetch);
-    await withEnvironment({ ELEVENLABS_API_KEY: "eleven-key", DEEPGRAM_API_KEY: "deepgram-key" }, async () => {
+    await withEnvironment({ VOICE_MODE: "hosted", ELEVENLABS_API_KEY: "eleven-key", DEEPGRAM_API_KEY: "deepgram-key" }, async () => {
       await assert.rejects(() => transcribeWav(pcmWav(), "en-IN"), (error: unknown) => {
         assert.ok(error instanceof SpeechServiceError);
         assert.equal(error.statusCode, 502);

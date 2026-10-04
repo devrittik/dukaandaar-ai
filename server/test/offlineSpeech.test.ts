@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { getSpeechStatus, SpeechServiceError, synthesizeSpeech, transcribeWav } from "../src/services/offlineSpeech.js";
 
 const CONFIG_KEYS = [
-  "SHERPA_ONNX_WHISPER_ENCODER_PATH", "SHERPA_ONNX_WHISPER_DECODER_PATH", "SHERPA_ONNX_WHISPER_TOKENS_PATH", "SHERPA_ONNX_WHISPER_LANGUAGE",
+  "VOICE_MODE", "SHERPA_ONNX_WHISPER_ENCODER_PATH", "SHERPA_ONNX_WHISPER_DECODER_PATH", "SHERPA_ONNX_WHISPER_TOKENS_PATH", "SHERPA_ONNX_WHISPER_LANGUAGE",
   "SHERPA_ONNX_TTS_MODEL_DIR", "SHERPA_ONNX_TTS_SPEAKER_ID", "SHERPA_ONNX_TTS_SPEED", "SHERPA_ONNX_TTS_NUM_STEPS",
   "VOICE_STT_PROVIDER_ORDER", "VOICE_TTS_PROVIDER_ORDER", "VOICE_STT_LANGUAGE", "ELEVENLABS_API_KEY", "ELEVENLABS_BASE_URL",
   "ELEVENLABS_STT_MODEL_ID", "ELEVENLABS_TTS_MODEL_ID", "ELEVENLABS_TTS_VOICE_ID", "ELEVENLABS_TTS_OUTPUT_FORMAT",
@@ -64,6 +64,49 @@ async function captureSpeechError(action: () => Promise<unknown>): Promise<Speec
   }
   assert.fail("Expected a SpeechServiceError");
 }
+
+test("VOICE_MODE isolates the hosted and local provider chains", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dukaandaar-speech-mode-test-"));
+  try {
+    const encoder = join(directory, "tiny-encoder.onnx");
+    const decoder = join(directory, "tiny-decoder.onnx");
+    const tokens = join(directory, "tiny-tokens.txt");
+    await Promise.all([
+      writeFile(encoder, "model"), writeFile(decoder, "model"), writeFile(tokens, "tokens"),
+      ...SUPERTONIC_MODEL_FILES.map((file) => writeFile(join(directory, file), "model asset")),
+    ]);
+
+    const availableAssetsAndCredentials = {
+      SHERPA_ONNX_WHISPER_ENCODER_PATH: encoder,
+      SHERPA_ONNX_WHISPER_DECODER_PATH: decoder,
+      SHERPA_ONNX_WHISPER_TOKENS_PATH: tokens,
+      SHERPA_ONNX_TTS_MODEL_DIR: directory,
+      ELEVENLABS_API_KEY: "eleven-key",
+      ELEVENLABS_TTS_VOICE_ID: "voice-id",
+      DEEPGRAM_API_KEY: "deepgram-key",
+      VOICE_STT_PROVIDER_ORDER: "deepgram,elevenlabs,sherpa-onnx",
+      VOICE_TTS_PROVIDER_ORDER: "deepgram,elevenlabs,sherpa-onnx",
+    };
+
+    await withEnvironment({ ...availableAssetsAndCredentials, VOICE_MODE: "hosted" }, async () => {
+      const status = await getSpeechStatus();
+      assert.deepEqual(status.stt.providers, ["deepgram", "elevenlabs"]);
+      assert.deepEqual(status.tts.providers, ["deepgram", "elevenlabs"]);
+    });
+
+    await withEnvironment({ ...availableAssetsAndCredentials, VOICE_MODE: "local" }, async () => {
+      const status = await getSpeechStatus();
+      assert.deepEqual(status.stt.providers, ["sherpa-onnx"]);
+      assert.deepEqual(status.tts.providers, ["sherpa-onnx"]);
+    });
+
+    await withEnvironment(availableAssetsAndCredentials, async () => {
+      const status = await getSpeechStatus();
+      assert.deepEqual(status.stt.providers, ["sherpa-onnx"]);
+      assert.deepEqual(status.tts.providers, ["sherpa-onnx"]);
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("speech status and unavailable engines fail clearly when assets are not configured", async () => {
   await withEnvironment({
