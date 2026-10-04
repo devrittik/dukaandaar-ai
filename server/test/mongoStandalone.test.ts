@@ -40,8 +40,9 @@ function fakeStandaloneDb({ failSaleInsert = false } = {}) {
 
 function adapterForStandalone(db: Db): MongoAdapter {
   const adapter = new MongoAdapter("mongodb://127.0.0.1:27017");
-  const internals = adapter as unknown as { db: Db; transactionsSupported: boolean };
+  const internals = adapter as unknown as { db: Db; shopDbs: Map<string, Db>; transactionsSupported: boolean };
   internals.db = db;
+  internals.shopDbs.set("shop_001", db);
   internals.transactionsSupported = false;
   return adapter;
 }

@@ -44,7 +44,7 @@ export interface DashboardData {
   recentActivity: Activity[];
   topProducts: Array<{ productId: string; name: string; qty: number; revenue: number }>;
 }
-export interface Health { ok: boolean; service: string; storage: string; }
+export interface Health { ok: boolean; service: string; storage: string; environment?: "development" | "production"; }
 export type SpeechProviderName = "elevenlabs" | "deepgram" | "sherpa-onnx";
 export interface SpeechStatus {
   stt: { available: boolean; engine: SpeechProviderName | null; providers: SpeechProviderName[] };

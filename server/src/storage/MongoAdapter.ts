@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { MongoClient, type ClientSession, type Db } from "mongodb";
 import { buildSeedData } from "../seedData.js";
 import { buildEnglishProductAliases, isEnglishProductSearchText, translateProductReferenceToEnglish } from "../services/productAliases.js";
@@ -22,6 +23,7 @@ import type {
   TimeFilter,
 } from "../types.js";
 import type { StorageAdapter, StoredAuthSession, StoredUserAccount } from "./StorageAdapter.js";
+import { DEFAULT_SHOP_DATABASE_PREFIX, shopDatabaseName, validateShopId } from "./tenantDatabase.js";
 
 type Doc = { _id?: string; [key: string]: any };
 
@@ -49,11 +51,18 @@ function isStandaloneTransactionError(error: unknown): boolean {
 export class MongoAdapter implements StorageAdapter {
   private readonly client: MongoClient;
   private db!: Db;
+  private readonly shopDbs = new Map<string, Db>();
+  private readonly initializedShopDbs = new Set<string>();
+  private readonly shopDbInitialization = new Map<string, Promise<void>>();
   private transactionsSupported = false;
   private standaloneWarningLogged = false;
-  private readonly shopCollectionNames = ["products", "inventory", "sales", "purchases", "expenses", "losses"];
+  private readonly shopCollectionNames = ["products", "inventory", "sales", "purchases", "expenses", "losses", "settings"];
 
-  constructor(uri: string, private readonly dbName = "dukaandaar") {
+  constructor(
+    uri: string,
+    private readonly dbName = "dukaandaar",
+    private readonly shopDbPrefix = process.env.MONGODB_SHOP_DB_PREFIX ?? DEFAULT_SHOP_DATABASE_PREFIX,
+  ) {
     this.client = new MongoClient(uri, { serverSelectionTimeoutMS: 10_000 });
   }
 
@@ -70,19 +79,13 @@ export class MongoAdapter implements StorageAdapter {
       logWarn("storage:mongo", "could not verify transaction support; using standalone-safe writes", error instanceof Error ? error.message : String(error));
     }
     if (!this.transactionsSupported) this.warnStandaloneWrites();
-    await Promise.all([ 
-      this.db.collection("products").createIndex({ shopId: 1, name: 1 }, { unique: true }),
-      this.db.collection("inventory").createIndex({ shopId: 1, productId: 1 }, { unique: true }),
-      this.db.collection("sales").createIndex({ shopId: 1, timestamp: -1 }),
-      this.db.collection("purchases").createIndex({ shopId: 1, timestamp: -1 }),
-      this.db.collection("expenses").createIndex({ shopId: 1, timestamp: -1 }),
-      this.db.collection("losses").createIndex({ shopId: 1, timestamp: -1 }),
+    await Promise.all([
       this.db.collection("users").createIndex({ email: 1 }, { unique: true }),
       this.db.collection("sessions").createIndex({ tokenHash: 1 }, { unique: true }),
       this.db.collection("sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       this.db.collection("sessions").createIndex({ userId: 1 }),
     ]);
-    log("storage:mongo", `connected to database=\"${this.dbName}\"`);
+    log("storage:mongo", `connected to control database="${this.dbName}"; shop database prefix="${this.shopDbPrefix}"`);
   }
 
   async disconnect(): Promise<void> {
@@ -93,6 +96,51 @@ export class MongoAdapter implements StorageAdapter {
   private collection(name: string) {
     if (!this.db) throw new Error("MongoDB is not connected");
     return this.db.collection<Doc>(name);
+  }
+
+  private shopDatabase(shopId: string): Db {
+    if (!this.db) throw new Error("MongoDB is not connected");
+    const normalizedShopId = validateShopId(shopId);
+    const cached = this.shopDbs.get(normalizedShopId);
+    if (cached) return cached;
+    const databaseName = shopDatabaseName(normalizedShopId, this.shopDbPrefix);
+    if (databaseName === this.dbName) throw new Error("The per-shop database name must differ from MONGODB_DB.");
+    const database = this.client.db(databaseName);
+    this.shopDbs.set(normalizedShopId, database);
+    return database;
+  }
+
+  private shopCollection(name: string, shopId: string) {
+    return this.shopDatabase(shopId).collection<Doc>(name);
+  }
+
+  private async ensureShopDatabase(shopId: string): Promise<void> {
+    const normalizedShopId = validateShopId(shopId);
+    if (this.initializedShopDbs.has(normalizedShopId)) return;
+    const pending = this.shopDbInitialization.get(normalizedShopId);
+    if (pending) return pending;
+
+    const initialization = (async () => {
+      const db = this.shopDatabase(normalizedShopId);
+      await Promise.all([
+        db.collection("products").createIndex({ shopId: 1, name: 1 }, { unique: true }),
+        db.collection("inventory").createIndex({ shopId: 1, productId: 1 }, { unique: true }),
+        db.collection("sales").createIndex({ shopId: 1, timestamp: -1 }),
+        db.collection("purchases").createIndex({ shopId: 1, timestamp: -1 }),
+        db.collection("expenses").createIndex({ shopId: 1, timestamp: -1 }),
+        db.collection("losses").createIndex({ shopId: 1, timestamp: -1 }),
+        db.collection("settings").createIndex({ shopId: 1 }, { unique: true }),
+      ]);
+      this.initializedShopDbs.add(normalizedShopId);
+    })();
+    this.shopDbInitialization.set(normalizedShopId, initialization);
+    try {
+      await initialization;
+      this.shopDbInitialization.delete(normalizedShopId);
+    } catch (error) {
+      this.shopDbInitialization.delete(normalizedShopId);
+      throw error;
+    }
   }
 
   async createUser(user: StoredUserAccount): Promise<void> {
@@ -175,7 +223,7 @@ export class MongoAdapter implements StorageAdapter {
   private async compensateStock(shopId: string, productId: string, delta: number): Promise<void> {
     const query: Doc = { shopId, productId };
     if (delta < 0) query.quantityOnHand = { $gte: Math.abs(delta) };
-    const result = await this.collection("inventory").updateOne(query, {
+    const result = await this.shopCollection("inventory", shopId).updateOne(query, {
       $inc: { quantityOnHand: delta },
       $set: { updatedAt: new Date().toISOString() },
     });
@@ -195,7 +243,7 @@ export class MongoAdapter implements StorageAdapter {
   }
 
   async listProducts(shopId: string): Promise<Product[]> {
-    const docs = await this.collection("products").find({ shopId }).sort({ name: 1 }).toArray();
+    const docs = await this.shopCollection("products", shopId).find({ shopId }).sort({ name: 1 }).toArray();
     return docs.map((doc) => withoutMongoId<Product>(doc));
   }
 
@@ -234,17 +282,17 @@ export class MongoAdapter implements StorageAdapter {
       updatedAt: now,
     };
     await this.withTransaction(async (session) => {
-      await this.collection("products").insertOne({ ...product, _id: product.id }, { session });
-      await this.collection("inventory").insertOne({ ...inventory, _id: inventory.id }, { session });
+      await this.shopCollection("products", input.shopId).insertOne({ ...product, _id: product.id }, { session });
+      await this.shopCollection("inventory", input.shopId).insertOne({ ...inventory, _id: inventory.id }, { session });
     }, async () => {
       try {
-        await this.collection("products").insertOne({ ...product, _id: product.id });
-        await this.collection("inventory").insertOne({ ...inventory, _id: inventory.id });
+        await this.shopCollection("products", input.shopId).insertOne({ ...product, _id: product.id });
+        await this.shopCollection("inventory", input.shopId).insertOne({ ...inventory, _id: inventory.id });
       } catch (error) {
-        await this.collection("inventory").deleteOne({ shopId: input.shopId, productId: product.id }).catch((rollbackError) => {
+        await this.shopCollection("inventory", input.shopId).deleteOne({ shopId: input.shopId, productId: product.id }).catch((rollbackError) => {
           logWarn("storage:mongo", "could not roll back partial product inventory insert", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
         });
-        await this.collection("products").deleteOne({ shopId: input.shopId, id: product.id }).catch((rollbackError) => {
+        await this.shopCollection("products", input.shopId).deleteOne({ shopId: input.shopId, id: product.id }).catch((rollbackError) => {
           logWarn("storage:mongo", "could not roll back partial product insert", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
         });
         throw error;
@@ -308,7 +356,7 @@ export class MongoAdapter implements StorageAdapter {
     const productDoc = { ...product, _id: product.id };
     const inventoryDoc = { ...inventory, _id: inventory.id };
     const updateOpeningStock = async (session?: ClientSession) => {
-      const result = await this.collection("inventory").updateOne(
+      const result = await this.shopCollection("inventory", input.shopId).updateOne(
         { shopId: input.shopId, productId: product.id, quantityOnHand: 0 },
         { $inc: { quantityOnHand: purchaseInput.qty }, $set: { updatedAt: purchaseInput.timestamp, lastRestockedAt: purchaseInput.timestamp } },
         session ? { session } : {},
@@ -317,24 +365,24 @@ export class MongoAdapter implements StorageAdapter {
     };
     try {
       await this.withTransaction(async (session) => {
-        await this.collection("products").insertOne(productDoc, { session });
-        await this.collection("inventory").insertOne(inventoryDoc, { session });
+        await this.shopCollection("products", input.shopId).insertOne(productDoc, { session });
+        await this.shopCollection("inventory", input.shopId).insertOne(inventoryDoc, { session });
         await updateOpeningStock(session);
-        await this.collection("purchases").insertOne(purchaseDoc, { session });
+        await this.shopCollection("purchases", purchaseInput.shopId).insertOne(purchaseDoc, { session });
       }, async () => {
         try {
-          await this.collection("products").insertOne(productDoc);
-          await this.collection("inventory").insertOne(inventoryDoc);
+          await this.shopCollection("products", input.shopId).insertOne(productDoc);
+          await this.shopCollection("inventory", input.shopId).insertOne(inventoryDoc);
           await updateOpeningStock();
-          await this.collection("purchases").insertOne(purchaseDoc);
+          await this.shopCollection("purchases", purchaseInput.shopId).insertOne(purchaseDoc);
         } catch (error) {
-          await this.collection("purchases").deleteOne({ shopId: purchaseInput.shopId, id: record.id }).catch((rollbackError) => {
+          await this.shopCollection("purchases", purchaseInput.shopId).deleteOne({ shopId: purchaseInput.shopId, id: record.id }).catch((rollbackError) => {
             logWarn("storage:mongo", "could not roll back initial purchase history entry", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
           });
-          await this.collection("inventory").deleteOne({ shopId: input.shopId, productId: product.id }).catch((rollbackError) => {
+          await this.shopCollection("inventory", input.shopId).deleteOne({ shopId: input.shopId, productId: product.id }).catch((rollbackError) => {
             logWarn("storage:mongo", "could not roll back initial product inventory", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
           });
-          await this.collection("products").deleteOne({ shopId: input.shopId, id: product.id }).catch((rollbackError) => {
+          await this.shopCollection("products", input.shopId).deleteOne({ shopId: input.shopId, id: product.id }).catch((rollbackError) => {
             logWarn("storage:mongo", "could not roll back initial product", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
           });
           throw error;
@@ -350,7 +398,7 @@ export class MongoAdapter implements StorageAdapter {
   }
 
   async updateProduct(shopId: string, productId: string, changes: ProductUpdate): Promise<Product> {
-    const existing = await this.collection("products").findOne({ shopId, id: productId });
+    const existing = await this.shopCollection("products", shopId).findOne({ shopId, id: productId });
     if (!existing) throw new Error("Product not found.");
     const current = withoutMongoId<Product>(existing);
     const { lowStockThreshold, ...productChanges } = changes;
@@ -364,20 +412,20 @@ export class MongoAdapter implements StorageAdapter {
     if (lowStockThreshold !== undefined && !stockBefore) throw new Error("Inventory record not found.");
     try {
       await this.withTransaction(async (session) => {
-        const result = await this.collection("products").updateOne({ shopId, id: productId }, { $set: updated }, { session });
+        const result = await this.shopCollection("products", shopId).updateOne({ shopId, id: productId }, { $set: updated }, { session });
         if (result.matchedCount !== 1) throw new Error("Product not found.");
         if (lowStockThreshold !== undefined) {
-          const stockResult = await this.collection("inventory").updateOne({ shopId, productId }, { $set: { lowStockThreshold, updatedAt: updated.updatedAt } }, { session });
+          const stockResult = await this.shopCollection("inventory", shopId).updateOne({ shopId, productId }, { $set: { lowStockThreshold, updatedAt: updated.updatedAt } }, { session });
           if (stockResult.matchedCount !== 1) throw new Error("Inventory record not found.");
         }
       }, async () => {
         let productUpdated = false;
         try {
-          const result = await this.collection("products").updateOne({ shopId, id: productId, updatedAt: current.updatedAt }, { $set: updated });
+          const result = await this.shopCollection("products", shopId).updateOne({ shopId, id: productId, updatedAt: current.updatedAt }, { $set: updated });
           if (result.matchedCount !== 1) throw new Error("Product not found or changed concurrently.");
           productUpdated = true;
           if (lowStockThreshold !== undefined) {
-            const stockResult = await this.collection("inventory").updateOne(
+            const stockResult = await this.shopCollection("inventory", shopId).updateOne(
               { shopId, productId, lowStockThreshold: stockBefore!.lowStockThreshold },
               { $set: { lowStockThreshold, updatedAt: updated.updatedAt } },
             );
@@ -385,12 +433,12 @@ export class MongoAdapter implements StorageAdapter {
           }
         } catch (error) {
           if (productUpdated) {
-            await this.collection("products").updateOne({ shopId, id: productId, updatedAt: updated.updatedAt }, { $set: current }).catch((rollbackError) => {
+            await this.shopCollection("products", shopId).updateOne({ shopId, id: productId, updatedAt: updated.updatedAt }, { $set: current }).catch((rollbackError) => {
               logWarn("storage:mongo", "could not roll back partial product edit", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
             });
           }
           if (lowStockThreshold !== undefined && stockBefore) {
-            await this.collection("inventory").updateOne(
+            await this.shopCollection("inventory", shopId).updateOne(
               { shopId, productId, lowStockThreshold },
               { $set: { lowStockThreshold: stockBefore.lowStockThreshold, updatedAt: stockBefore.updatedAt } },
             ).catch((rollbackError) => {
@@ -410,12 +458,12 @@ export class MongoAdapter implements StorageAdapter {
   }
 
   async listInventory(shopId: string): Promise<Inventory[]> {
-    const docs = await this.collection("inventory").find({ shopId }).toArray();
+    const docs = await this.shopCollection("inventory", shopId).find({ shopId }).toArray();
     return docs.map((doc) => withoutMongoId<Inventory>(doc));
   }
 
   async getInventory(shopId: string, productId: string): Promise<Inventory | null> {
-    const doc = await this.collection("inventory").findOne({ shopId, productId });
+    const doc = await this.shopCollection("inventory", shopId).findOne({ shopId, productId });
     return doc ? withoutMongoId<Inventory>(doc) : null;
   }
 
@@ -425,7 +473,7 @@ export class MongoAdapter implements StorageAdapter {
     const now = new Date().toISOString();
     const set: Doc = { updatedAt: now };
     if (delta > 0) set.lastRestockedAt = now;
-    const result = await this.collection("inventory").updateOne(query, { $inc: { quantityOnHand: delta }, $set: set });
+    const result = await this.shopCollection("inventory", shopId).updateOne(query, { $inc: { quantityOnHand: delta }, $set: set });
     if (result.matchedCount !== 1) throw new Error(delta < 0 ? "Insufficient stock" : "Inventory record not found");
     const updated = await this.getInventory(shopId, productId);
     if (!updated) throw new Error("Inventory record not found after update");
@@ -443,28 +491,28 @@ export class MongoAdapter implements StorageAdapter {
     input.items.forEach((item) => quantities.set(item.productId, (quantities.get(item.productId) ?? 0) + item.qty));
     await this.withTransaction(async (session) => {
       for (const [productId, qty] of quantities) {
-        const result = await this.collection("inventory").updateOne(
+        const result = await this.shopCollection("inventory", input.shopId).updateOne(
           { shopId: input.shopId, productId, quantityOnHand: { $gte: qty } },
           { $inc: { quantityOnHand: -qty }, $set: { updatedAt: new Date().toISOString() } },
           { session },
         );
         if (result.matchedCount !== 1) throw new Error(`Insufficient stock for ${input.items.find((item) => item.productId === productId)?.productName ?? productId}`);
       }
-      await this.collection("sales").insertOne({ ...record, _id: record.id }, { session });
+      await this.shopCollection("sales", input.shopId).insertOne({ ...record, _id: record.id }, { session });
     }, async () => {
       const applied: Array<{ productId: string; delta: number }> = [];
       try {
         for (const [productId, qty] of quantities) {
-          const result = await this.collection("inventory").updateOne(
+          const result = await this.shopCollection("inventory", input.shopId).updateOne(
             { shopId: input.shopId, productId, quantityOnHand: { $gte: qty } },
             { $inc: { quantityOnHand: -qty }, $set: { updatedAt: new Date().toISOString() } },
           );
           if (result.matchedCount !== 1) throw new Error(`Insufficient stock for ${input.items.find((item) => item.productId === productId)?.productName ?? productId}`);
           applied.push({ productId, delta: -qty });
         }
-        await this.collection("sales").insertOne({ ...record, _id: record.id });
+        await this.shopCollection("sales", input.shopId).insertOne({ ...record, _id: record.id });
       } catch (error) {
-        await this.collection("sales").deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
+        await this.shopCollection("sales", input.shopId).deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
           logWarn("storage:mongo", "could not remove partial sale record", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
         });
         await this.rollbackStock(input.shopId, applied);
@@ -480,29 +528,29 @@ export class MongoAdapter implements StorageAdapter {
     input.items.forEach((item) => quantities.set(item.productId, (quantities.get(item.productId) ?? 0) + item.qty));
     await this.withTransaction(async (session) => {
       for (const [productId, qty] of quantities) {
-        const result = await this.collection("inventory").updateOne(
+        const result = await this.shopCollection("inventory", input.shopId).updateOne(
           { shopId: input.shopId, productId },
           { $inc: { quantityOnHand: qty }, $set: { updatedAt: new Date().toISOString(), lastRestockedAt: new Date().toISOString() } },
           { session },
         );
         if (result.matchedCount !== 1) throw new Error(`Inventory record not found for ${productId}`);
       }
-      await this.collection("purchases").insertOne({ ...record, _id: record.id }, { session });
+      await this.shopCollection("purchases", input.shopId).insertOne({ ...record, _id: record.id }, { session });
     }, async () => {
       const applied: Array<{ productId: string; delta: number }> = [];
       try {
         for (const [productId, qty] of quantities) {
           const now = new Date().toISOString();
-          const result = await this.collection("inventory").updateOne(
+          const result = await this.shopCollection("inventory", input.shopId).updateOne(
             { shopId: input.shopId, productId },
             { $inc: { quantityOnHand: qty }, $set: { updatedAt: now, lastRestockedAt: now } },
           );
           if (result.matchedCount !== 1) throw new Error(`Inventory record not found for ${productId}`);
           applied.push({ productId, delta: qty });
         }
-        await this.collection("purchases").insertOne({ ...record, _id: record.id });
+        await this.shopCollection("purchases", input.shopId).insertOne({ ...record, _id: record.id });
       } catch (error) {
-        await this.collection("purchases").deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
+        await this.shopCollection("purchases", input.shopId).deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
           logWarn("storage:mongo", "could not remove partial purchase record", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
         });
         await this.rollbackStock(input.shopId, applied);
@@ -514,32 +562,32 @@ export class MongoAdapter implements StorageAdapter {
 
   async createExpense(input: NewExpense): Promise<Expense> {
     const record: Expense = { ...input, id: `expense_${randomUUID().slice(0, 10)}` };
-    await this.collection("expenses").insertOne({ ...record, _id: record.id });
+    await this.shopCollection("expenses", input.shopId).insertOne({ ...record, _id: record.id });
     return record;
   }
 
   async createLoss(input: NewLoss): Promise<Loss> {
     const record: Loss = { ...input, id: `loss_${randomUUID().slice(0, 10)}` };
     await this.withTransaction(async (session) => {
-      const result = await this.collection("inventory").updateOne(
+      const result = await this.shopCollection("inventory", input.shopId).updateOne(
         { shopId: input.shopId, productId: input.productId, quantityOnHand: { $gte: input.qty } },
         { $inc: { quantityOnHand: -input.qty }, $set: { updatedAt: new Date().toISOString() } },
         { session },
       );
       if (result.matchedCount !== 1) throw new Error(`Insufficient stock to record loss for ${input.productName}`);
-      await this.collection("losses").insertOne({ ...record, _id: record.id }, { session });
+      await this.shopCollection("losses", input.shopId).insertOne({ ...record, _id: record.id }, { session });
     }, async () => {
       let stockReduced = false;
       try {
-        const result = await this.collection("inventory").updateOne(
+        const result = await this.shopCollection("inventory", input.shopId).updateOne(
           { shopId: input.shopId, productId: input.productId, quantityOnHand: { $gte: input.qty } },
           { $inc: { quantityOnHand: -input.qty }, $set: { updatedAt: new Date().toISOString() } },
         );
         if (result.matchedCount !== 1) throw new Error(`Insufficient stock to record loss for ${input.productName}`);
         stockReduced = true;
-        await this.collection("losses").insertOne({ ...record, _id: record.id });
+        await this.shopCollection("losses", input.shopId).insertOne({ ...record, _id: record.id });
       } catch (error) {
-        await this.collection("losses").deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
+        await this.shopCollection("losses", input.shopId).deleteOne({ shopId: input.shopId, id: record.id }).catch((rollbackError) => {
           logWarn("storage:mongo", "could not remove partial stock-loss record", rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
         });
         if (stockReduced) await this.rollbackStock(input.shopId, [{ productId: input.productId, delta: -input.qty }]);
@@ -550,17 +598,17 @@ export class MongoAdapter implements StorageAdapter {
   }
 
   async querySales(shopId: string, filter: TimeFilter = {}): Promise<Sale[]> {
-    const docs = await this.collection("sales").find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
+    const docs = await this.shopCollection("sales", shopId).find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
     return docs.map((doc) => withoutMongoId<Sale>(doc));
   }
 
   async queryPurchases(shopId: string, filter: TimeFilter = {}): Promise<Purchase[]> {
-    const docs = await this.collection("purchases").find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
+    const docs = await this.shopCollection("purchases", shopId).find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
     return docs.map((doc) => withoutMongoId<Purchase>(doc));
   }
 
   async queryExpenses(shopId: string, filter: TimeFilter = {}): Promise<Expense[]> {
-    const docs = await this.collection("expenses").find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
+    const docs = await this.shopCollection("expenses", shopId).find({ shopId, ...timeQuery(filter) }).sort({ timestamp: -1 }).toArray();
     return docs.map((doc) => withoutMongoId<Expense>(doc));
   }
 
@@ -568,12 +616,13 @@ export class MongoAdapter implements StorageAdapter {
     const query = { shopId, ...timeQuery(filter) };
     if (filter.productId) delete (query as Doc)["items.productId"];
     if (filter.productId) (query as Doc).productId = filter.productId;
-    const docs = await this.collection("losses").find(query).sort({ timestamp: -1 }).toArray();
+    const docs = await this.shopCollection("losses", shopId).find(query).sort({ timestamp: -1 }).toArray();
     return docs.map((doc) => withoutMongoId<Loss>(doc));
   }
 
   async getSettings(shopId: string): Promise<Settings> {
-    const doc = await this.collection("settings").findOne({ shopId });
+    await this.ensureShopDatabase(shopId);
+    const doc = await this.shopCollection("settings", shopId).findOne({ shopId });
     const defaults: Settings = {
       shopId,
       shopName: "My Shop",
@@ -591,33 +640,80 @@ export class MongoAdapter implements StorageAdapter {
   async updateSettings(shopId: string, changes: SettingsUpdate): Promise<Settings> {
     const current = await this.getSettings(shopId);
     const updated: Settings = { ...current, ...changes, shopId };
-    await this.collection("settings").replaceOne({ shopId }, { ...updated, _id: shopId }, { upsert: true });
+    await this.shopCollection("settings", shopId).replaceOne({ shopId }, { ...updated, _id: shopId }, { upsert: true });
     return updated;
   }
 
-  async seed(): Promise<void> {
-    const data = buildSeedData(process.env.SHOP_ID ?? "shop_001");
-    const shopId = data.settings.shopId;
+  async seed(shopId: string): Promise<void> {
+    const normalizedShopId = validateShopId(shopId);
+    const data = buildSeedData(normalizedShopId);
+    await this.ensureShopDatabase(normalizedShopId);
     const writeSeed = async (session?: ClientSession): Promise<void> => {
       const options = session ? { session } : {};
-      for (const name of this.shopCollectionNames) await this.collection(name).deleteMany({ shopId }, options);
-      await this.collection("settings").deleteMany({ shopId }, options);
-      await this.collection("products").insertMany(data.products.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("inventory").insertMany(data.inventory.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("sales").insertMany(data.sales.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("purchases").insertMany(data.purchases.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("expenses").insertMany(data.expenses.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("losses").insertMany(data.losses.map((item) => ({ ...item, _id: item.id })), options);
-      await this.collection("settings").insertOne({ ...data.settings, _id: shopId }, options);
+      for (const name of this.shopCollectionNames) {
+        await this.shopCollection(name, normalizedShopId).deleteMany({ shopId: normalizedShopId }, options);
+      }
+      await this.shopCollection("products", normalizedShopId).insertMany(data.products.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("inventory", normalizedShopId).insertMany(data.inventory.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("sales", normalizedShopId).insertMany(data.sales.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("purchases", normalizedShopId).insertMany(data.purchases.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("expenses", normalizedShopId).insertMany(data.expenses.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("losses", normalizedShopId).insertMany(data.losses.map((item) => ({ ...item, _id: item.id })), options);
+      await this.shopCollection("settings", normalizedShopId).insertOne({ ...data.settings, _id: normalizedShopId }, options);
     };
 
-    try {
-      await this.withTransaction((session) => writeSeed(session), () => writeSeed());
-    } catch (error) {
-      if (!isStandaloneTransactionError(error)) throw error;
-      logWarn("storage:mongo", "local MongoDB is standalone; applying the manual seed without a transaction. Rerun the seed if interrupted; use a replica set for atomic writes.");
-      await writeSeed();
+    await this.withTransaction((session) => writeSeed(session), () => writeSeed());
+    log("storage:mongo", "seeded isolated shop database", {
+      shopId: normalizedShopId,
+      database: shopDatabaseName(normalizedShopId, this.shopDbPrefix),
+      products: data.products.length,
+      sales: data.sales.length,
+    });
+  }
+
+  /** Explicit, account-scoped migration from the pre-tenant database; legacy SHOP_ID data is never selected. */
+  async migrateAccountShopData(shopId: string): Promise<Record<string, number>> {
+    const normalizedShopId = validateShopId(shopId);
+    const legacyShopIds = new Set([process.env.SHOP_ID ?? "shop_001", "shop_001"]);
+    if (legacyShopIds.has(normalizedShopId)) {
+      throw new Error("Refusing to migrate the legacy SHOP_ID fixture. It remains untouched and unclaimed.");
     }
-    log("storage:mongo", "seeded demo shop", { products: data.products.length, sales: data.sales.length });
+    const account = await this.collection("users").findOne({ shopId: normalizedShopId });
+    if (!account) throw new Error(`No account owns ${normalizedShopId}; migration is limited to registered account shops.`);
+    await this.ensureShopDatabase(normalizedShopId);
+
+    const migrate = async (session?: ClientSession): Promise<Record<string, number>> => {
+      const options = session ? { session } : {};
+      const copied: Record<string, number> = {};
+      for (const name of this.shopCollectionNames) {
+        const source = await this.db.collection<Doc>(name).find({ shopId: normalizedShopId }, options).toArray();
+        const destination = this.shopCollection(name, normalizedShopId);
+        for (const document of source) {
+          if (document._id === undefined) throw new Error(`Cannot migrate ${name} record without a Mongo _id.`);
+          const existing = await destination.findOne({ _id: document._id }, options);
+          if (existing && !isDeepStrictEqual(existing, document)) {
+            throw new Error(`Conflicting ${name} record ${String(document._id)} exists in the isolated database; no legacy records were deleted.`);
+          }
+          if (!existing) await destination.replaceOne({ _id: document._id }, document, { ...options, upsert: true });
+        }
+        const destinationCount = await destination.countDocuments({ shopId: normalizedShopId }, options);
+        if (destinationCount < source.length) throw new Error(`Could not verify all ${name} records in the isolated database; no legacy records were deleted.`);
+        copied[name] = source.length;
+      }
+
+      // Only delete from the old shared database after every collection has been copied and verified.
+      for (const name of this.shopCollectionNames) {
+        await this.db.collection<Doc>(name).deleteMany({ shopId: normalizedShopId }, options);
+      }
+      return copied;
+    };
+
+    const counts = await this.withTransaction((session) => migrate(session), () => migrate());
+    log("storage:mongo", "migrated account data into isolated shop database", {
+      shopId: normalizedShopId,
+      database: shopDatabaseName(normalizedShopId, this.shopDbPrefix),
+      counts,
+    });
+    return counts;
   }
 }

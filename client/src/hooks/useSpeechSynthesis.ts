@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 
-export function useSpeechSynthesis(serverTtsEnabled = false) {
+export function useSpeechSynthesis(serverTtsEnabled = false, allowBrowserFallback = true) {
   const [enabled, setEnabled] = useState(true);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const browserSupported = typeof window !== "undefined" && "speechSynthesis" in window;
-  const supported = serverTtsEnabled || browserSupported;
+  const supported = serverTtsEnabled || (allowBrowserFallback && browserSupported);
 
   const cancel = useCallback(() => {
     controllerRef.current?.abort();
@@ -27,13 +27,13 @@ export function useSpeechSynthesis(serverTtsEnabled = false) {
   }, []);
 
   const speakInBrowser = useCallback((text: string, language: string) => {
-    if (!browserSupported || !text.trim()) return;
+    if (!allowBrowserFallback || !browserSupported || !text.trim()) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = language;
     utterance.rate = 0.96;
     window.speechSynthesis.speak(utterance);
-  }, [browserSupported]);
+  }, [allowBrowserFallback, browserSupported]);
 
   useEffect(() => { if (!enabled) cancel(); }, [enabled, cancel]);
 

@@ -26,6 +26,10 @@ function normalize(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim();
 }
 
+function recordKey(shopId: string, id: string): string {
+  return `${shopId}\u0000${id}`;
+}
+
 function insideRange(timestamp: string, filter: TimeFilter = {}): boolean {
   const time = new Date(timestamp).getTime();
   if (filter.from && time < new Date(filter.from).getTime()) return false;
@@ -89,15 +93,18 @@ export class InMemoryAdapter implements StorageAdapter {
     }
   }
 
-  async seed(): Promise<void> {
-    const data = buildSeedData(process.env.SHOP_ID ?? "shop_001");
-    for (const collection of [this.products, this.inventory, this.sales, this.purchases, this.expenses, this.losses, this.settings]) collection.clear();
-    data.products.forEach((item) => this.products.set(item.id, structuredClone(item)));
-    data.inventory.forEach((item) => this.inventory.set(item.productId, structuredClone(item)));
-    data.sales.forEach((item) => this.sales.set(item.id, structuredClone(item)));
-    data.purchases.forEach((item) => this.purchases.set(item.id, structuredClone(item)));
-    data.expenses.forEach((item) => this.expenses.set(item.id, structuredClone(item)));
-    data.losses.forEach((item) => this.losses.set(item.id, structuredClone(item)));
+  async seed(shopId: string): Promise<void> {
+    const data = buildSeedData(shopId);
+    for (const collection of [this.products, this.inventory, this.sales, this.purchases, this.expenses, this.losses]) {
+      for (const [key, record] of collection) if (record.shopId === shopId) collection.delete(key);
+    }
+    this.settings.delete(shopId);
+    data.products.forEach((item) => this.products.set(recordKey(shopId, item.id), structuredClone(item)));
+    data.inventory.forEach((item) => this.inventory.set(recordKey(shopId, item.productId), structuredClone(item)));
+    data.sales.forEach((item) => this.sales.set(recordKey(shopId, item.id), structuredClone(item)));
+    data.purchases.forEach((item) => this.purchases.set(recordKey(shopId, item.id), structuredClone(item)));
+    data.expenses.forEach((item) => this.expenses.set(recordKey(shopId, item.id), structuredClone(item)));
+    data.losses.forEach((item) => this.losses.set(recordKey(shopId, item.id), structuredClone(item)));
     this.settings.set(data.settings.shopId, structuredClone(data.settings));
     log("storage:memory", "seeded demo shop", { products: data.products.length, sales: data.sales.length });
   }
@@ -140,8 +147,8 @@ export class InMemoryAdapter implements StorageAdapter {
       lastRestockedAt: input.openingStock > 0 ? now : null,
       updatedAt: now,
     };
-    this.products.set(product.id, product);
-    this.inventory.set(product.id, inventory);
+    this.products.set(recordKey(input.shopId, product.id), product);
+    this.inventory.set(recordKey(input.shopId, product.id), inventory);
     return structuredClone(product);
   }
 
@@ -155,8 +162,8 @@ export class InMemoryAdapter implements StorageAdapter {
     const product = await this.createProduct({ ...input, openingStock: 0 });
     const lineTotal = purchaseInput.qty * purchaseInput.unitCost;
     if (!Number.isFinite(lineTotal)) {
-      this.products.delete(product.id);
-      this.inventory.delete(product.id);
+      this.products.delete(recordKey(input.shopId, product.id));
+      this.inventory.delete(recordKey(input.shopId, product.id));
       throw new Error("Initial purchase total is too large.");
     }
     const item = { productId: product.id, productName: product.name, qty: purchaseInput.qty, unitCost: purchaseInput.unitCost, lineTotal };
@@ -172,26 +179,28 @@ export class InMemoryAdapter implements StorageAdapter {
       confirmedByUser: purchaseInput.confirmedByUser,
     };
     try {
-      const inventory = this.inventory.get(product.id);
+      const key = recordKey(input.shopId, product.id);
+      const inventory = this.inventory.get(key);
       if (!inventory) throw new Error("Inventory record not found for initial purchase.");
-      this.inventory.set(product.id, {
+      this.inventory.set(key, {
         ...inventory,
         quantityOnHand: inventory.quantityOnHand + purchaseInput.qty,
         lastRestockedAt: purchaseInput.timestamp,
         updatedAt: purchaseInput.timestamp,
       });
-      this.purchases.set(record.id, record);
+      this.purchases.set(recordKey(purchaseInput.shopId, record.id), record);
       return { product, purchase: structuredClone(record) };
     } catch (error) {
-      this.purchases.delete(record.id);
-      this.products.delete(product.id);
-      this.inventory.delete(product.id);
+      this.purchases.delete(recordKey(purchaseInput.shopId, record.id));
+      this.products.delete(recordKey(input.shopId, product.id));
+      this.inventory.delete(recordKey(input.shopId, product.id));
       throw error;
     }
   }
 
   async updateProduct(shopId: string, productId: string, changes: ProductUpdate): Promise<Product> {
-    const current = this.products.get(productId);
+    const key = recordKey(shopId, productId);
+    const current = this.products.get(key);
     if (!current || current.shopId !== shopId) throw new Error("Product not found.");
     const name = changes.name?.trim() || current.name;
     const category = changes.category?.trim() || current.category;
@@ -200,11 +209,11 @@ export class InMemoryAdapter implements StorageAdapter {
     const aliases = buildEnglishProductAliases(name, sourceAliases, category, unit);
     const updated: Product = { ...current, ...changes, name, category, unit, aliases, updatedAt: new Date().toISOString() };
     if (changes.lowStockThreshold !== undefined) {
-      const stock = this.inventory.get(productId);
+      const stock = this.inventory.get(key);
       if (!stock || stock.shopId !== shopId) throw new Error("Inventory record not found.");
-      this.inventory.set(productId, { ...stock, lowStockThreshold: changes.lowStockThreshold, updatedAt: updated.updatedAt });
+      this.inventory.set(key, { ...stock, lowStockThreshold: changes.lowStockThreshold, updatedAt: updated.updatedAt });
     }
-    this.products.set(productId, updated);
+    this.products.set(key, updated);
     return structuredClone(updated);
   }
 
@@ -213,17 +222,18 @@ export class InMemoryAdapter implements StorageAdapter {
   }
 
   async getInventory(shopId: string, productId: string): Promise<Inventory | null> {
-    const item = this.inventory.get(productId);
+    const item = this.inventory.get(recordKey(shopId, productId));
     return item?.shopId === shopId ? structuredClone(item) : null;
   }
 
   async adjustStock(shopId: string, productId: string, delta: number): Promise<Inventory> {
-    const item = this.inventory.get(productId);
+    const key = recordKey(shopId, productId);
+    const item = this.inventory.get(key);
     if (!item || item.shopId !== shopId) throw new Error("Inventory record not found");
     const next = item.quantityOnHand + delta;
     if (next < 0) throw new Error("Insufficient stock");
     const updated = { ...item, quantityOnHand: next, updatedAt: new Date().toISOString(), ...(delta > 0 ? { lastRestockedAt: new Date().toISOString() } : {}) };
-    this.inventory.set(productId, updated);
+    this.inventory.set(key, updated);
     return structuredClone(updated);
   }
 
@@ -238,12 +248,12 @@ export class InMemoryAdapter implements StorageAdapter {
     const quantities = new Map<string, number>();
     input.items.forEach((item) => quantities.set(item.productId, (quantities.get(item.productId) ?? 0) + item.qty));
     for (const [productId, qty] of quantities) {
-      const stock = this.inventory.get(productId);
+      const stock = this.inventory.get(recordKey(input.shopId, productId));
       if (!stock || stock.shopId !== input.shopId || stock.quantityOnHand < qty) throw new Error(`Insufficient stock for ${input.items.find((item) => item.productId === productId)?.productName ?? productId}`);
     }
     for (const [productId, qty] of quantities) await this.adjustStock(input.shopId, productId, -qty);
     const record: Sale = { ...structuredClone(input), id: `sale_${randomUUID().slice(0, 10)}` };
-    this.sales.set(record.id, record);
+    this.sales.set(recordKey(input.shopId, record.id), record);
     return structuredClone(record);
   }
 
@@ -251,27 +261,27 @@ export class InMemoryAdapter implements StorageAdapter {
     const quantities = new Map<string, number>();
     input.items.forEach((item) => quantities.set(item.productId, (quantities.get(item.productId) ?? 0) + item.qty));
     for (const productId of quantities.keys()) {
-      const stock = this.inventory.get(productId);
+      const stock = this.inventory.get(recordKey(input.shopId, productId));
       if (!stock || stock.shopId !== input.shopId) throw new Error("Inventory record not found for purchase item");
     }
     for (const [productId, qty] of quantities) await this.adjustStock(input.shopId, productId, qty);
     const record: Purchase = { ...structuredClone(input), id: `purchase_${randomUUID().slice(0, 10)}` };
-    this.purchases.set(record.id, record);
+    this.purchases.set(recordKey(input.shopId, record.id), record);
     return structuredClone(record);
   }
 
   async createExpense(input: NewExpense): Promise<Expense> {
     const record: Expense = { ...structuredClone(input), id: `expense_${randomUUID().slice(0, 10)}` };
-    this.expenses.set(record.id, record);
+    this.expenses.set(recordKey(input.shopId, record.id), record);
     return structuredClone(record);
   }
 
   async createLoss(input: NewLoss): Promise<Loss> {
-    const stock = this.inventory.get(input.productId);
+    const stock = this.inventory.get(recordKey(input.shopId, input.productId));
     if (!stock || stock.shopId !== input.shopId || stock.quantityOnHand < input.qty) throw new Error(`Insufficient stock to record loss for ${input.productName}`);
     await this.adjustStock(input.shopId, input.productId, -input.qty);
     const record: Loss = { ...structuredClone(input), id: `loss_${randomUUID().slice(0, 10)}` };
-    this.losses.set(record.id, record);
+    this.losses.set(recordKey(input.shopId, record.id), record);
     return structuredClone(record);
   }
 

@@ -73,5 +73,5 @@ export interface StorageAdapter {
   // Lifecycle and repeatable demo seed
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  seed(): Promise<void>;
+  seed(shopId: string): Promise<void>;
 }

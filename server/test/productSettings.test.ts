@@ -54,7 +54,7 @@ test("confirmed assistant product edits update catalog and alert threshold witho
   process.env.LLM_PROVIDER = "rules";
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const product = (await storage.listProducts("shop_001")).find((item) => item.id === "prod_maggi")!;
   const before = await storage.getInventory("shop_001", product.id);
   const assistant = new BusinessLogic(storage);
@@ -80,7 +80,7 @@ test("manual product creation stores English-only generated aliases", async () =
   process.env.LLM_PROVIDER = "rules";
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const assistant = new BusinessLogic(storage);
 
   const result = await assistant.recordManual("product", {
@@ -106,7 +106,7 @@ test("manual zero-stock product creation skips purchase history", async () => {
   process.env.LLM_PROVIDER = "rules";
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const assistant = new BusinessLogic(storage);
 
   const result = await assistant.recordManual("product", {
@@ -123,7 +123,7 @@ test("manual zero-stock product creation skips purchase history", async () => {
 test("shop profile settings update and flow into dashboard data", async () => {
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const updated = await storage.updateSettings("shop_001", {
     shopName: "Kolkata Corner Shop",
     ownerName: "Asha Das",

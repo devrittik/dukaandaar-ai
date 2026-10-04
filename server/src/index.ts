@@ -11,7 +11,10 @@ import { getDashboard } from "./services/analyticsService.js";
 import { isConversationLanguage } from "./services/conversationLocale.js";
 import { getSpeechStatus, SpeechServiceError, speechUploadLimitBytes, synthesizeSpeech, transcribeWav } from "./services/offlineSpeech.js";
 import { log, logError, logWarn } from "./utils/logger.js";
+import { validateRuntimeConfiguration } from "./config/runtimeConfig.js";
 
+const runtimeEnvironment = validateRuntimeConfiguration();
+process.env.NODE_ENV = runtimeEnvironment;
 const PORT = Number(process.env.PORT ?? 4000);
 const storage = createStorage();
 const auth = new AuthService(storage);
@@ -101,13 +104,13 @@ function readSessionToken(request: Request): string | null {
 function setSessionCookie(response: Response, token: string, expiresAt: Date): void {
   const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
   const cookie = [`${SESSION_COOKIE_NAME}=${token}`, "Path=/api", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
-  if (process.env.NODE_ENV === "production") cookie.push("Secure");
+  if (runtimeEnvironment === "production") cookie.push("Secure");
   response.setHeader("Set-Cookie", cookie.join("; "));
 }
 
 function clearSessionCookie(response: Response): void {
   const cookie = [`${SESSION_COOKIE_NAME}=`, "Path=/api", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"];
-  if (process.env.NODE_ENV === "production") cookie.push("Secure");
+  if (runtimeEnvironment === "production") cookie.push("Secure");
   response.setHeader("Set-Cookie", cookie.join("; "));
 }
 
@@ -129,7 +132,7 @@ const requireAuthentication: RequestHandler = (request, response, next) => {
 
 app.disable("x-powered-by");
 const configuredOrigins = process.env.CLIENT_ORIGIN?.split(",").map((value) => value.trim()).filter(Boolean);
-const corsOrigins = configuredOrigins?.length ? configuredOrigins : process.env.NODE_ENV === "production" ? false : true;
+const corsOrigins = configuredOrigins?.length ? configuredOrigins : runtimeEnvironment === "production" ? false : true;
 app.use(cors({ origin: corsOrigins, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use((request, _response, next) => {
@@ -148,7 +151,7 @@ const requireBrowserRequestHeader: RequestHandler = (request, response, next) =>
 app.use("/api", requireBrowserRequestHeader);
 
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, service: "dukaandaar-api", storage: process.env.STORAGE_DRIVER ?? "mongo" });
+  response.json({ ok: true, service: "dukaandaar-api", storage: process.env.STORAGE_DRIVER ?? "mongo", environment: runtimeEnvironment });
 });
 
 app.post("/api/auth/signup", async (request, response, next) => {

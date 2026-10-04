@@ -45,6 +45,22 @@ test("different registrations receive isolated shop IDs; login normalizes email"
   assert.equal(login.user.shopName, "First Shop");
 });
 
+test("seeded in-memory shops keep duplicate fixture IDs and reseeds isolated", async () => {
+  const storage = new InMemoryAdapter();
+  await storage.seed("shop_alpha");
+  await storage.seed("shop_beta");
+
+  assert.equal((await storage.listProducts("shop_alpha")).length, 8);
+  assert.equal((await storage.listProducts("shop_beta")).length, 8);
+  await storage.adjustStock("shop_alpha", "prod_maggi", -5);
+  assert.equal((await storage.getInventory("shop_alpha", "prod_maggi"))?.quantityOnHand, 32);
+  assert.equal((await storage.getInventory("shop_beta", "prod_maggi"))?.quantityOnHand, 37);
+
+  await storage.seed("shop_alpha");
+  assert.equal((await storage.getInventory("shop_alpha", "prod_maggi"))?.quantityOnHand, 37);
+  assert.equal((await storage.getInventory("shop_beta", "prod_maggi"))?.quantityOnHand, 37);
+});
+
 test("signup rejects duplicate emails and login errors do not disclose account existence", async () => {
   const auth = new AuthService(new InMemoryAdapter());
   await auth.register({ ownerName: "Asha", shopName: "Asha Shop", email: "asha@example.com", password: "a-long-test-password" });

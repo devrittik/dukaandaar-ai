@@ -36,7 +36,7 @@ test("assistant translates a foreign product reference with the LLM before catal
   configureHosted();
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const requests: string[] = [];
   globalThis.fetch = (async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
@@ -61,7 +61,7 @@ test("chat/voice product creation generates and stores only English aliases", as
   configureHosted();
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const requests: string[] = [];
   globalThis.fetch = (async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
@@ -110,7 +110,7 @@ test("zero-opening-stock assistant creation adds only the product catalog entry"
   process.env.LLM_PROVIDER = "rules";
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const assistant = new BusinessLogic(storage);
 
   const preview = await assistant.parseTranscript("Add product Zero Soap, selling price 25, cost price 16, opening stock 0", "text", "en");
@@ -132,7 +132,7 @@ test("compact new-product price and quantity shorthand records a 40-unit purchas
   process.env.LLM_PROVIDER = "rules";
   const storage = new InMemoryAdapter();
   await storage.connect();
-  await storage.seed();
+  await storage.seed("shop_001");
   const assistant = new BusinessLogic(storage);
 
   const preview = await assistant.parseTranscript("new product X @10 cost, @20 sell, 40 pieces purchased", "text", "en");

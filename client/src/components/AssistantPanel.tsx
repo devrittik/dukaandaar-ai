@@ -112,7 +112,8 @@ export function AssistantPanel({ health, onMutation, onEdit, sessionId, onNewCon
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
-  const { enabled: ttsEnabled, setEnabled: setTtsEnabled, supported: ttsSupported, speak, cancel: cancelSpeech } = useSpeechSynthesis(Boolean(speechStatus?.tts.available));
+  const browserSpeechAllowed = health?.environment !== "production";
+  const { enabled: ttsEnabled, setEnabled: setTtsEnabled, supported: ttsSupported, speak, cancel: cancelSpeech } = useSpeechSynthesis(Boolean(speechStatus?.tts.available), browserSpeechAllowed);
   const appendSpeechTranscript = (transcript: string) => {
     setInput((current) => appendTranscript(current, transcript));
     setSource("voice");
@@ -123,7 +124,9 @@ export function AssistantPanel({ health, onMutation, onEdit, sessionId, onNewCon
   };
   const browserSpeech = useSpeechRecognition(appendSpeechTranscript, recognitionLanguage);
   const serverSpeech = useServerSpeechRecognition(appendSpeechTranscript, recognitionLanguage, Boolean(speechStatus?.stt.available), api.transcribeAudio);
-  const speech = speechStatus?.stt.available && !useBrowserSpeechFallback ? serverSpeech : browserSpeech;
+  const speech = speechStatus?.stt.available && !useBrowserSpeechFallback
+    ? serverSpeech
+    : browserSpeechAllowed ? browserSpeech : serverSpeech;
 
   useEffect(() => {
     const error = serverSpeech.error;
@@ -134,13 +137,16 @@ export function AssistantPanel({ health, onMutation, onEdit, sessionId, onNewCon
     if (error === lastServerSpeechErrorRef.current) return;
     lastServerSpeechErrorRef.current = error;
     if (!speechStatus?.stt.available) return;
-    if (browserSpeech.supported) {
+    if (browserSpeechAllowed && browserSpeech.supported) {
       setUseBrowserSpeechFallback(true);
       setSpeechFallbackNotice(uiText(uiLanguage, "serverSpeechFallback"));
-    } else {
+    } else if (browserSpeechAllowed) {
       setSpeechFallbackNotice(uiText(uiLanguage, "browserSpeechUnavailable"));
+    } else {
+      setUseBrowserSpeechFallback(false);
+      setSpeechFallbackNotice(null);
     }
-  }, [browserSpeech.supported, serverSpeech.error, speechStatus?.stt.available, uiLanguage]);
+  }, [browserSpeech.supported, browserSpeechAllowed, serverSpeech.error, speechStatus?.stt.available, uiLanguage]);
 
   useEffect(() => {
     let active = true;
