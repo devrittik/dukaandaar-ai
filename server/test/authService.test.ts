@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { getDashboard } from "../src/services/analyticsService.js";
 import { AuthError, AuthService } from "../src/services/authService.js";
 import { InMemoryAdapter } from "../src/storage/InMemoryAdapter.js";
+import { shopDatabaseName } from "../src/storage/tenantDatabase.js";
 
 test("signup creates a private empty shop and an opaque revocable session", async () => {
   const storage = new InMemoryAdapter();
@@ -16,6 +17,8 @@ test("signup creates a private empty shop and an opaque revocable session", asyn
 
   assert.equal(grant.user.email, "asha@example.com");
   assert.equal(grant.user.shopName, "Sen General Store");
+  assert.match(grant.user.shopId, /^shop_[A-Za-z0-9_-]{22}$/u);
+  assert.equal(Buffer.byteLength(shopDatabaseName(grant.user.shopId, "dukaandaar_")), 38);
   assert.ok(grant.token.length >= 40);
   assert.equal((await auth.authenticate(grant.token))?.shopId, grant.user.shopId);
 

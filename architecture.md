@@ -38,7 +38,7 @@ The client and server are separate TypeScript projects with separate npm manifes
 
 ### API (`server/`)
 
-`server/src/index.ts` creates the Express app, validates the runtime environment, connects storage, and registers API routes. For a normal authenticated request, the main path is:
+`server/src/index.ts` loads `.env`, creates the Express app, validates the runtime environment, registers API routes, and starts the Node server. For a normal authenticated request, the main path is:
 
 1. The request passes CORS handling, JSON/audio parsing, logging, and a write-request header check.
 2. The API reads the session cookie, hashes its token, and asks `AuthService` to find the corresponding live session and user.
@@ -121,7 +121,7 @@ The database name is:
 <MONGODB_SHOP_DB_PREFIX><shop_id>
 ```
 
-The default prefix is `dukaandaar_`, so an ID such as `shop_abcd...` becomes a name such as `dukaandaar_shop_abcd...`. The control database and shop databases use the same MongoDB deployment/cluster, but are separate MongoDB databases. Keep the prefix and the shop ID stable: the name is how the adapter finds that shop's records.
+The default prefix is `dukaandaar_`, so an ID such as `shop_abcd...` becomes a name such as `dukaandaar_shop_abcd...`. New signups use a 128-bit random suffix encoded as 22 base64url characters; together with `shop_` and the default prefix, the database name is exactly 38 ASCII bytes. Existing accounts retain their stored shop IDs and database names. The control database and shop databases use the same MongoDB deployment/cluster, but are separate MongoDB databases. Keep the prefix and each shop ID stable: the name is how the adapter finds that shop's records.
 
 Each tenant database contains these collections:
 
@@ -315,7 +315,7 @@ client/src/
   types.ts                  Client-side API response/request types
 
 server/src/
-  index.ts                  Express middleware, auth, routes, startup/shutdown
+  index.ts                  Express app, middleware, auth, API routes, startup/shutdown
   config/runtimeConfig.ts   Development/production validation
   services/
     authService.ts          Signup, scrypt password hashes, cookie-session lookup
@@ -363,6 +363,11 @@ npm run build
 ```
 
 Tests use Node's built-in test runner through `tsx`. Mock/fake storage and stubbed provider responses let most checks run without production credentials. For real Mongo testing, use a disposable database; for migration or seeding, back up first and verify the supplied shop ID carefully.
+
+## License
+
+This project is distributed under the [MIT License](LICENSE).
+r migration or seeding, back up first and verify the supplied shop ID carefully.
 
 ## License
 
