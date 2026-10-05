@@ -63,7 +63,7 @@ export function toPublicAuthUser(user: AuthPrincipal): PublicAuthUser {
 }
 
 export class AuthService {
-  constructor(private readonly storage: StorageAdapter) { }
+  constructor(private readonly storage: StorageAdapter) {}
 
   async register(input: { ownerName: string; shopName: string; email: string; password: string }): Promise<SessionGrant> {
     const email = normalizedEmail(input.email);

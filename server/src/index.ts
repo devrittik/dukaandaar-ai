@@ -1,5 +1,6 @@
 import "dotenv/config";
 import cors from "cors";
+import morgan from "morgan";
 import express, { type ErrorRequestHandler, type Request, type RequestHandler, type Response } from "express";
 import { z, ZodError } from "zod";
 import { createStorage } from "./storage/index.js";
@@ -14,7 +15,6 @@ import { log, logError, logWarn } from "./utils/logger.js";
 import { validateRuntimeConfiguration } from "./config/runtimeConfig.js";
 
 const runtimeEnvironment = validateRuntimeConfiguration();
-process.env.NODE_ENV = runtimeEnvironment;
 const PORT = Number(process.env.PORT ?? 4000);
 const storage = createStorage();
 const auth = new AuthService(storage);
@@ -89,6 +89,10 @@ function conversationSessionId(value: unknown): string | null {
 }
 
 const SESSION_COOKIE_NAME = "dukaandaar_session";
+// Hosted frontends and APIs are often on different sites. SameSite=Lax suppresses
+// the session cookie on credentialed cross-site fetches, so production uses None
+// together with Secure; the non-browser write guard and exact CORS allowlist remain active.
+const SESSION_COOKIE_SAME_SITE = runtimeEnvironment === "production" ? "None" : "Lax";
 function readSessionToken(request: Request): string | null {
   const cookieHeader = request.headers.cookie;
   if (!cookieHeader) return null;
@@ -103,13 +107,13 @@ function readSessionToken(request: Request): string | null {
 
 function setSessionCookie(response: Response, token: string, expiresAt: Date): void {
   const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
-  const cookie = [`${SESSION_COOKIE_NAME}=${token}`, "Path=/api", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
+  const cookie = [`${SESSION_COOKIE_NAME}=${token}`, "Path=/api", "HttpOnly", `SameSite=${SESSION_COOKIE_SAME_SITE}`, `Max-Age=${maxAge}`];
   if (runtimeEnvironment === "production") cookie.push("Secure");
   response.setHeader("Set-Cookie", cookie.join("; "));
 }
 
 function clearSessionCookie(response: Response): void {
-  const cookie = [`${SESSION_COOKIE_NAME}=`, "Path=/api", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"];
+  const cookie = [`${SESSION_COOKIE_NAME}=`, "Path=/api", "HttpOnly", `SameSite=${SESSION_COOKIE_SAME_SITE}`, "Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT"];
   if (runtimeEnvironment === "production") cookie.push("Secure");
   response.setHeader("Set-Cookie", cookie.join("; "));
 }
@@ -131,14 +135,12 @@ const requireAuthentication: RequestHandler = (request, response, next) => {
 };
 
 app.disable("x-powered-by");
+app.use(morgan("dev", { stream: { write: (line) => log("http", line.trim()) } }));
+
 const configuredOrigins = process.env.CLIENT_ORIGIN?.split(",").map((value) => value.trim()).filter(Boolean);
 const corsOrigins = configuredOrigins?.length ? configuredOrigins : runtimeEnvironment === "production" ? false : true;
 app.use(cors({ origin: corsOrigins, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
-app.use((request, _response, next) => {
-  log("http", `${request.method} ${request.path}`);
-  next();
-});
 
 const requireBrowserRequestHeader: RequestHandler = (request, response, next) => {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) { next(); return; }
@@ -350,26 +352,28 @@ const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => 
 };
 app.use(errorHandler);
 
-async function start(): Promise<void> {
+async function startServer(): Promise<void> {
   await storage.connect();
-  app.listen(PORT, "0.0.0.0", () => {
-    log("server", `listening on 0.0.0.0:${PORT}`, {
-      STORAGE_DRIVER: process.env.STORAGE_DRIVER ?? "mongo",
-      LLM_PROVIDER: process.env.LLM_PROVIDER ?? "rules",
-      PORT,
-    });
-  });
+  app.listen(PORT, "0.0.0.0", () => log("server", `listening on 0.0.0.0:${PORT}`, {
+    STORAGE_DRIVER: process.env.STORAGE_DRIVER ?? "mongo",
+    LLM_PROVIDER: process.env.LLM_PROVIDER ?? "rules",
+    PORT,
+  }));
 }
 
-start().catch(async (error) => {
+async function stopServer(): Promise<void> {
+  await storage.disconnect();
+}
+
+void startServer().catch(async (error) => {
   logError("server", "startup failed", error);
-  await storage.disconnect().catch(() => undefined);
+  await stopServer().catch(() => undefined);
   process.exit(1);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     log("server", `${signal} received, closing storage`);
-    void storage.disconnect().finally(() => process.exit(0));
+    void stopServer().finally(() => process.exit(0));
   });
 }

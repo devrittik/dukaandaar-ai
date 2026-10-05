@@ -33,7 +33,7 @@ The client and server are separate TypeScript projects with separate npm manifes
 - React owns the visible pages and temporary interface state. The Assistant is the first page after sign-in; other views include Overview, Transactions, Inventory, Reports, and Settings.
 - `client/src/api/client.ts` sends requests with `credentials: "include"`, a JSON content type, and `X-Requested-With: Dukaandaar` on application requests.
 - In development, Vite serves the website (normally port `5173`) and proxies relative `/api` requests to the API (normally port `4000`). The browser still uses a same-origin URL.
-- If the website and API are deployed separately, set `VITE_API_BASE_URL` before building the website and set `CLIENT_ORIGIN` on the API. Use HTTPS and keep both on the same site for the `SameSite=Lax` session cookie.
+- If the website and API are deployed separately, set `VITE_API_BASE_URL` to the API's HTTPS origin before building the website and set `CLIENT_ORIGIN` to the exact website origin on the API. Production cookies use `SameSite=None; Secure` for cross-site credentialed requests; browser third-party-cookie blocking can still require a same-site proxy or custom-domain subdomains.
 - The selected Assistant language and chat messages live in page state. An opaque conversation-session ID is kept in per-tab `sessionStorage`; no authentication token is stored in browser storage.
 
 ### API (`server/`)
@@ -78,7 +78,7 @@ The API validates request bodies with Zod in the route or business layer. There 
 
 ### Account creation and login
 
-`AuthService` normalizes email to lowercase and creates a random user ID and a separate random shop ID for every signup. It stores a salted scrypt password hash. A login session uses a random token; only the token's SHA-256 hash is stored in MongoDB. The browser receives the original token in an `HttpOnly`, `SameSite=Lax` cookie scoped to `/api`; production cookies also have `Secure`. Sessions expire after 30 days, and logout revokes the session.
+`AuthService` normalizes email to lowercase and creates a random user ID and a separate random shop ID for every signup. It stores a salted scrypt password hash. A login session uses a random token; only the token's SHA-256 hash is stored in MongoDB. The browser receives the original token in an `HttpOnly` cookie scoped to `/api`; development uses `SameSite=Lax`, while production uses `SameSite=None; Secure` so a separately hosted frontend can send credentials to the API. Sessions expire after 30 days, and logout revokes the session.
 
 User and session records live in the shared control database. The public auth response does not expose the internal `shopId`. When a request is authenticated, the API resolves the user's internal shop ID and passes it to the rest of the application.
 
@@ -301,7 +301,7 @@ The API validates `NODE_ENV` as `development`/`dev` or `production`/`prod` befor
 
 The production template lists the supported environment variables. A hosted voice chain may contain ElevenLabs and/or Deepgram; an unconfigured provider is skipped. ElevenLabs TTS additionally needs a voice ID. Provider keys and all production service settings stay on the API server. The web app's `VITE_API_BASE_URL` is public build-time configuration, not a secret.
 
-For production, build the server and client separately. Run the API with `npm start` after `npm run build`; deploy the client's `client/dist/` files to a static web host. Configure the frontend origin and API origin consistently, use HTTPS, and keep the sites same-site for the cookie. Do not serve the Vite development server as the production website.
+For production, build the server and client separately. Run the API with `npm start` after `npm run build`; deploy the client's `client/dist/` files to a static web host. Set `VITE_API_BASE_URL` at client build time, set `CLIENT_ORIGIN` to the exact HTTPS frontend origin on the API, and allow credentialed CORS. Production session cookies use `SameSite=None; Secure`; some browsers still block third-party cookies, in which case route `/api` through the website's same-site origin or use subdomains under one custom domain. Do not serve the Vite development server as the production website.
 
 ## Source map and change guide
 

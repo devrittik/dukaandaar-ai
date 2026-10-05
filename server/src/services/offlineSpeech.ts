@@ -44,8 +44,6 @@ export interface SynthesizedSpeech { audio: Buffer; contentType: string }
 
 interface ProcessResult { stdout: string; stderr: string }
 
-const require = createRequire(import.meta.url);
-
 function envValue(name: string, fallback = ""): string {
   return (process.env[name] ?? fallback).trim();
 }
@@ -72,7 +70,7 @@ async function fileExists(path: string | undefined): Promise<boolean> {
 }
 
 function sherpaPackageEntry(): string | null {
-  try { return require.resolve("sherpa-onnx"); }
+  try { return createRequire(import.meta.url).resolve("sherpa-onnx"); }
   catch { return null; }
 }
 
