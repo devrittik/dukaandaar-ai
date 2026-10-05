@@ -167,8 +167,8 @@ export function buildSeedData(shopId = process.env.SHOP_ID ?? "shop_001"): SeedD
 
   const settings: Settings = {
     shopId,
-    shopName: "Ramesh General Store",
-    ownerName: "Ramesh Kumar",
+    shopName: "Jarvis Kirana Store",
+    ownerName: "Ramu Downey Jr",
     phone: "",
     address: "",
     currency: "INR",
